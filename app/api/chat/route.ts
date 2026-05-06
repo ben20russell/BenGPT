@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
 type SearchMode = "quick" | "agentic" | "deep";
+type ForceMode = "auto" | "web" | "enterprise";
 
 type ChatRequestBody = {
+  query?: string;
+  forceMode?: ForceMode | null;
   message?: string;
   searchMode?: SearchMode;
 };
@@ -41,10 +44,18 @@ export async function POST(req: NextRequest) {
   try {
     console.log("[/api/chat] Received request");
     const body = (await req.json()) as ChatRequestBody;
+    const query = body.query?.trim();
     const message = body.message?.trim();
-    const searchMode = body.searchMode ?? "quick";
+    const text = query ?? message;
+    const forceMode = body.forceMode ?? null;
+    const searchMode =
+      forceMode === "web"
+        ? "deep"
+        : forceMode === "enterprise"
+          ? "agentic"
+          : (body.searchMode ?? "quick");
 
-    if (!message) {
+    if (!text) {
       console.log("[/api/chat] Validation failed: missing message");
       return NextResponse.json(
         {
@@ -92,7 +103,7 @@ export async function POST(req: NextRequest) {
           search_context_size: searchMode === "deep" ? "high" : "medium",
         },
       ],
-      input: message,
+      input: text,
     });
 
     const citations =
