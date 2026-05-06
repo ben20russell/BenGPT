@@ -86,15 +86,6 @@ function modeToApiMode(mode: SearchMode): ApiSearchMode {
 }
 
 export default function SearchInterface() {
-  const [apiKey, setApiKey] = useState<string>(() => {
-    if (typeof window === 'undefined') return '';
-    return sessionStorage.getItem('oai_key') ?? '';
-  });
-  const [keyOverlayOpen, setKeyOverlayOpen] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return true;
-    return !(sessionStorage.getItem('oai_key') ?? '');
-  });
-  const [rememberKey, setRememberKey] = useState(false);
   const [toast, setToast] = useState('');
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -138,24 +129,6 @@ export default function SearchInterface() {
 
   function showToast(message: string) {
     setToast(message);
-  }
-
-  function submitKey() {
-    console.log('[UI] submitKey requested');
-    const trimmed = apiKey.trim();
-    if (!trimmed || !trimmed.startsWith('sk-')) {
-      console.log('[UI] API key rejected by validation');
-      showToast('Enter a valid OpenAI API key (starts with sk-)');
-      return;
-    }
-
-    if (rememberKey) {
-      console.log('[UI] Remembering key in session storage');
-      sessionStorage.setItem('oai_key', trimmed);
-    }
-
-    console.log('[UI] API key accepted, hiding overlay');
-    setKeyOverlayOpen(false);
   }
 
   function getModeLabel(mode: SearchMode) {
@@ -224,10 +197,6 @@ export default function SearchInterface() {
 
     const userText = (overrideText ?? input).trim();
     if (!userText) return;
-    if (keyOverlayOpen) {
-      showToast('Connect your API key before sending.');
-      return;
-    }
 
     console.log('[UI] Sending message', {
       model: currentModel,
@@ -374,42 +343,7 @@ export default function SearchInterface() {
   return (
     <UIErrorBoundary>
       <div className="search-ui" data-testid="search-ui-root">
-        {keyOverlayOpen ? (
-          <div id="key-overlay" data-testid="key-overlay">
-            <div id="key-modal">
-              <h2>Connect to OpenAI</h2>
-              <p>Enter your API key to start searching</p>
-              <input
-                id="key-input"
-                data-testid="key-input"
-                type="password"
-                value={apiKey}
-                placeholder="sk-proj-..."
-                autoComplete="off"
-                onChange={(event) => setApiKey(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') submitKey();
-                }}
-              />
-              <label className="remember-row" htmlFor="key-remember">
-                <input
-                  id="key-remember"
-                  data-testid="key-remember"
-                  type="checkbox"
-                  checked={rememberKey}
-                  onChange={(event) => setRememberKey(event.target.checked)}
-                />
-                Remember for this session
-              </label>
-              <button id="key-submit" data-testid="key-submit" type="button" onClick={submitKey}>
-                Connect →
-              </button>
-              <p className="modal-note">Your key stays in your browser session.</p>
-            </div>
-          </div>
-        ) : null}
-
-        <div id="app" data-testid="app-root" style={{ display: keyOverlayOpen ? 'none' : 'flex' }}>
+        <div id="app" data-testid="app-root">
           <aside id="sidebar" className={!sidebarOpen ? 'collapsed' : ''} data-testid="sidebar">
             <div id="sidebar-top">
               <button id="new-chat-btn" data-testid="new-chat-btn" type="button" onClick={newChat}>
@@ -611,7 +545,7 @@ export default function SearchInterface() {
                       id="send-btn"
                       data-testid="send-btn"
                       type="button"
-                      disabled={!isLoading && (input.trim().length === 0 || keyOverlayOpen)}
+                      disabled={!isLoading && input.trim().length === 0}
                       className={isLoading ? 'loading' : ''}
                       onClick={() => void sendMessage()}
                     >
@@ -659,7 +593,7 @@ export default function SearchInterface() {
         #sidebar { width: var(--sidebar-w); min-width: var(--sidebar-w); background: var(--sidebar-bg); display: flex; flex-direction: column; border-right: 1px solid var(--border); }
         #sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
         #sidebar-top { padding: 10px; }
-        #new-chat-btn, .conv-item, .model-selector, .mode-pill, .tool-btn, .action-btn, .suggestion-btn, #send-btn, #sidebar-toggle, #key-submit {
+        #new-chat-btn, .conv-item, .model-selector, .mode-pill, .tool-btn, .action-btn, .suggestion-btn, #send-btn, #sidebar-toggle {
           cursor: pointer;
         }
         #new-chat-btn { width: 100%; padding: 10px 12px; border: none; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); text-align: left; }
@@ -720,16 +654,6 @@ export default function SearchInterface() {
         #send-btn { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--send-bg); color: var(--send-color); }
         #send-btn:disabled { background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.4); cursor: not-allowed; }
         #footer-note { max-width: 760px; margin: 10px auto 0; font-size: 12px; color: var(--text-tertiary); text-align: center; }
-
-        #key-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; padding: 24px; }
-        #key-modal { width: 100%; max-width: 420px; background: #2f2f2f; border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
-        #key-modal h2 { margin-bottom: 6px; }
-        #key-modal p { color: var(--text-secondary); margin-bottom: 16px; }
-        #key-input { width: 100%; border: 1px solid var(--border); background: #171717; color: var(--text-primary); border-radius: var(--radius-md); padding: 10px 12px; margin-bottom: 10px; }
-        .remember-row { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 13px; margin-bottom: 12px; }
-        #key-submit { width: 100%; border: none; border-radius: var(--radius-md); padding: 10px; background: var(--accent); color: white; font-weight: 600; }
-        #key-submit:hover { background: var(--accent-hover); }
-        .modal-note { margin-top: 10px; font-size: 11px; color: var(--text-tertiary); text-align: center; }
 
         #toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: #3a3a3a; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 9px 18px; font-size: 13px; color: var(--text-primary); z-index: 200; opacity: 0; transition: opacity .25s; pointer-events: none; }
         #toast.show { opacity: 1; }
