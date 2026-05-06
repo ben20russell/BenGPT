@@ -37,11 +37,6 @@ type ResponsesApi = {
   };
 };
 
-const client = new OpenAI({
-  apiKey: process.env.AZURE_OPENAI_API_KEY,
-  baseURL: `${process.env.AZURE_OPENAI_ENDPOINT}openai/v1/`,
-});
-
 export async function POST(req: NextRequest) {
   try {
     console.log("[/api/chat] Received request");
@@ -79,6 +74,11 @@ export async function POST(req: NextRequest) {
     console.log("[/api/chat] Calling Azure OpenAI responses.create", {
       searchMode,
       deployment: process.env.AZURE_OPENAI_DEPLOYMENT,
+    });
+
+    const client = new OpenAI({
+      apiKey: process.env.AZURE_OPENAI_API_KEY,
+      baseURL: `${process.env.AZURE_OPENAI_ENDPOINT}openai/v1/`,
     });
 
     // Map modes: "quick" | "agentic" | "deep_research"
