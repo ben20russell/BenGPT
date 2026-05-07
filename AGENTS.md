@@ -56,4 +56,6 @@
   - Capture and report the actual active Vite local URL printed in terminal (for example: `http://127.0.0.1:3004/`).
   - Verify a listener exists on the chosen localhost port (example: `lsof -nP -iTCP -sTCP:LISTEN | rg 3004`).
   - Always share the active localhost network URL in the completion message.
+  - Always provide one fixed and currently working localhost URL after every update.
+  - If multiple local servers are running, choose one URL, confirm it is listening, and report only that single fixed URL.
 - If you encounter the runtime/tooling error `stream disconnected before completion: response.failed event received`, continue the task and retry or proceed with the next safe step instead of stopping.
