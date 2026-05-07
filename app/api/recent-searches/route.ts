@@ -50,13 +50,20 @@ function getSupabaseClient(): SupabaseClient | null {
   const supabaseKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
+  const allowLocalFallback =
+    process.env.NODE_ENV === "test" || process.env.RECENT_SEARCHES_ALLOW_FILE_FALLBACK === "true";
 
   if (!supabaseUrl || !supabaseKey) {
-    if (supabaseClient !== null) {
-      console.log("[/api/recent-searches] Supabase env vars are missing; using local file storage fallback");
+    if (allowLocalFallback) {
+      if (supabaseClient !== null) {
+        console.log("[/api/recent-searches] Supabase env vars are missing; using local file storage fallback");
+      }
+      supabaseClient = null;
+      return supabaseClient;
     }
-    supabaseClient = null;
-    return supabaseClient;
+    throw new Error(
+      "Missing Supabase environment variables. Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
+    );
   }
 
   if (typeof supabaseClient !== "undefined" && supabaseClient !== null) return supabaseClient;
@@ -272,7 +279,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(
       {
         error: "Could not load recent searches.",
-        recovery: "Try again in a moment.",
+        recovery: "Check Supabase environment variables in deployment settings, then retry.",
       },
       { status: 500 },
     );
@@ -305,6 +312,9 @@ export async function POST(req: NextRequest) {
       activeConversationId,
     });
     if (!wroteToSupabase) {
+      if (process.env.NODE_ENV !== "test" && process.env.RECENT_SEARCHES_ALLOW_FILE_FALLBACK !== "true") {
+        throw new Error("Supabase write was skipped and local fallback is disabled in this environment.");
+      }
       const store = await readStore();
       store[key] = {
         conversations,
@@ -331,7 +341,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error: "Could not save recent searches.",
-        recovery: "Try again in a moment.",
+        recovery: "Check Supabase environment variables and table/policies, then retry.",
       },
       { status: 500 },
     );
