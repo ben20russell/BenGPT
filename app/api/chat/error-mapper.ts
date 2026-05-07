@@ -30,7 +30,7 @@ export function toUserFacingChatError(error: unknown): { error: string; recovery
     return {
       error: "Azure OpenAI deployment was not found or is not available.",
       recovery:
-        "Verify AZURE_OPENAI_DEPLOYMENT exactly matches your Azure deployment name (for example: ben-gpt-5.5).",
+        "Verify AZURE_OPENAI_DEPLOYMENT exactly matches your Azure deployment name (for example: ben-gpt-5.4).",
     };
   }
 

@@ -55,6 +55,11 @@ type Conversation = {
   turns: Turn[];
 };
 
+type RecentSearchesResponse = {
+  conversations?: Conversation[];
+  activeConversationId?: string | null;
+};
+
 type BoundaryState = {
   hasError: boolean;
   message: string;
@@ -578,6 +583,8 @@ class UIErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> 
 export default function SearchInterface() {
   const [toast, setToast] = useState('');
   const [isUiBooted, setIsUiBooted] = useState(process.env.NODE_ENV === 'test');
+  const [deviceId, setDeviceId] = useState('');
+  const [recentsHydrated, setRecentsHydrated] = useState(false);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -615,6 +622,117 @@ export default function SearchInterface() {
     }, 0);
     return () => window.clearTimeout(bootTimer);
   }, []);
+
+  useEffect(() => {
+    try {
+      const storageKey = 'beacon-search-device-id';
+      const existing = window.localStorage.getItem(storageKey);
+      if (existing) {
+        console.log('[UI] Using existing device id', { deviceId: existing });
+        setDeviceId(existing);
+        return;
+      }
+
+      const generated = `dev-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      window.localStorage.setItem(storageKey, generated);
+      console.log('[UI] Generated new device id', { deviceId: generated });
+      setDeviceId(generated);
+    } catch (error) {
+      const fallback = `dev-fallback-${Math.random().toString(36).slice(2, 10)}`;
+      console.log('[UI] Failed to access localStorage for device id; using fallback', { error, fallback });
+      setDeviceId(fallback);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!deviceId) return;
+    let cancelled = false;
+
+    async function loadRecents() {
+      try {
+        console.log('[UI] Loading recent searches', { deviceId });
+        const endpoint = process.env.NODE_ENV === 'test' ? 'http://localhost/api/recent-searches' : '/api/recent-searches';
+        const response = await fetch(endpoint, {
+          method: 'GET',
+          headers: {
+            'x-device-id': deviceId,
+          },
+          cache: 'no-store',
+        });
+        if (!response.ok) {
+          console.log('[UI] Recent searches load returned non-OK status', { status: response.status });
+          return;
+        }
+
+        const json = (await response.json()) as RecentSearchesResponse;
+        if (cancelled) return;
+
+        const nextConversations = Array.isArray(json.conversations) ? json.conversations : [];
+        const nextActiveId = typeof json.activeConversationId === 'string' ? json.activeConversationId : null;
+        const hasActive = nextActiveId ? nextConversations.some((conversation) => conversation.id === nextActiveId) : false;
+
+        setConversations(nextConversations);
+        setActiveConversationId(hasActive ? nextActiveId : null);
+        console.log('[UI] Recent searches loaded', {
+          count: nextConversations.length,
+          activeConversationId: hasActive ? nextActiveId : null,
+        });
+      } catch (error) {
+        console.log('[UI] Failed to load recent searches', { error });
+      } finally {
+        if (!cancelled) {
+          setRecentsHydrated(true);
+        }
+      }
+    }
+
+    void loadRecents();
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceId]);
+
+  useEffect(() => {
+    if (!deviceId) return;
+    if (!recentsHydrated) return;
+    if (isLoading) return;
+
+    let cancelled = false;
+
+    async function saveRecents() {
+      try {
+        console.log('[UI] Saving recent searches', {
+          deviceId,
+          count: conversations.length,
+          activeConversationId,
+        });
+        const endpoint = process.env.NODE_ENV === 'test' ? 'http://localhost/api/recent-searches' : '/api/recent-searches';
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-device-id': deviceId,
+          },
+          body: JSON.stringify({
+            conversations,
+            activeConversationId,
+          }),
+        });
+        if (!response.ok && !cancelled) {
+          console.log('[UI] Failed to save recent searches', { status: response.status });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.log('[UI] Failed to save recent searches', { error });
+        }
+      }
+    }
+
+    void saveRecents();
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceId, recentsHydrated, conversations, activeConversationId, isLoading]);
 
   useEffect(() => {
     if (!toast) return;

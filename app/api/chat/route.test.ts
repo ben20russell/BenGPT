@@ -9,7 +9,7 @@ describe("POST /api/chat Azure config validation", () => {
   it("returns 500 when AZURE_OPENAI_API_VERSION is missing", async () => {
     process.env.AZURE_OPENAI_API_KEY = "test-key";
     process.env.AZURE_OPENAI_ENDPOINT = "https://example.cognitiveservices.azure.com/openai";
-    process.env.AZURE_OPENAI_DEPLOYMENT = "ben-gpt-5.5";
+    process.env.AZURE_OPENAI_DEPLOYMENT = "ben-gpt-5.4";
     delete process.env.AZURE_OPENAI_API_VERSION;
 
     const req = new Request("http://localhost/api/chat", {
