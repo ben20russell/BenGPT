@@ -66,6 +66,12 @@ type RecentSearchesLocalSnapshot = {
   activeConversationId: string | null;
 };
 
+type DeletedConversationSnapshot = {
+  conversation: Conversation;
+  index: number;
+  wasActive: boolean;
+};
+
 const RECENTS_LAST_SNAPSHOT_KEY = 'beacon-search-recents:last';
 
 type BoundaryState = {
@@ -599,6 +605,9 @@ export default function SearchInterface() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null);
   const [editingConversationTitle, setEditingConversationTitle] = useState('');
+  const [recentlyDeletedConversation, setRecentlyDeletedConversation] = useState<DeletedConversationSnapshot | null>(
+    null,
+  );
 
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -942,6 +951,73 @@ export default function SearchInterface() {
       ),
     );
     showToast('Recent search renamed');
+  }
+
+  function deleteConversation(conversationId: string) {
+    const conversationIndex = conversations.findIndex((item) => item.id === conversationId);
+    const conversation = conversationIndex >= 0 ? conversations[conversationIndex] : null;
+    if (!conversation) {
+      console.log('[UI] Delete skipped: conversation not found', { conversationId });
+      return;
+    }
+
+    const wasActive = conversation.id === activeConversationId;
+    console.log('[UI] Deleting conversation from recents', {
+      conversationId,
+      title: conversation.title,
+      conversationIndex,
+      wasActive,
+    });
+    setRecentlyDeletedConversation({
+      conversation,
+      index: conversationIndex,
+      wasActive,
+    });
+
+    setConversations((prev) => prev.filter((item) => item.id !== conversationId));
+    if (wasActive) {
+      const fallbackConversation = conversations.find((item) => item.id !== conversationId);
+      setActiveConversationId(fallbackConversation?.id ?? null);
+    }
+    if (editingConversationId === conversationId) {
+      setEditingConversationId(null);
+      setEditingConversationTitle('');
+    }
+    showToast('Recent search deleted. Undo is available in-row.');
+  }
+
+  function undoDeleteConversation() {
+    if (!recentlyDeletedConversation) {
+      console.log('[UI] Undo delete skipped: no recent deleted snapshot available');
+      return;
+    }
+
+    const { conversation, index, wasActive } = recentlyDeletedConversation;
+    console.log('[UI] Undoing recent search deletion', {
+      conversationId: conversation.id,
+      title: conversation.title,
+      insertIndex: index,
+      wasActive,
+    });
+    setConversations((prev) => {
+      const insertAt = Math.max(0, Math.min(index, prev.length));
+      const next = [...prev];
+      next.splice(insertAt, 0, conversation);
+      return next;
+    });
+    if (wasActive) {
+      setActiveConversationId(conversation.id);
+    }
+    setRecentlyDeletedConversation(null);
+    showToast('Recent search restored');
+  }
+
+  function dismissDeletedConversationRow() {
+    if (!recentlyDeletedConversation) return;
+    console.log('[UI] Dismissing deleted conversation row', {
+      conversationId: recentlyDeletedConversation.conversation.id,
+    });
+    setRecentlyDeletedConversation(null);
   }
 
   function beginInlineRename(conversationId: string) {
@@ -1430,49 +1506,109 @@ export default function SearchInterface() {
             </div>
             <div className="sidebar-section-label">Recents</div>
             <div id="conv-list" data-testid="conv-list">
-              {conversations.map((conversation) => (
-                <div
-                  key={conversation.id}
-                  className={`conv-row ${conversation.id === activeConversationId ? 'active' : ''}`}
-                  data-testid={`conversation-row-${conversation.id}`}
-                >
-                  {editingConversationId === conversation.id ? (
-                    <input
-                      className="conv-title-input"
-                      data-testid={`conversation-edit-${conversation.id}`}
-                      value={editingConversationTitle}
-                      onChange={(event) => setEditingConversationTitle(event.target.value)}
-                      onBlur={() => commitInlineRename(conversation.id)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          event.preventDefault();
-                          commitInlineRename(conversation.id);
-                        } else if (event.key === 'Escape') {
-                          event.preventDefault();
-                          cancelInlineRename();
-                        }
-                      }}
-                      autoFocus
-                    />
-                  ) : (
+              {conversations.map((conversation, index) => (
+                <React.Fragment key={conversation.id}>
+                  {recentlyDeletedConversation && recentlyDeletedConversation.index === index ? (
+                    <div
+                      className="conv-row conv-row-deleted"
+                      data-testid={`conversation-deleted-row-${recentlyDeletedConversation.conversation.id}`}
+                    >
+                      <div className="conv-item conv-item-deleted">
+                        Deleted: {recentlyDeletedConversation.conversation.title}
+                      </div>
+                      <button
+                        type="button"
+                        className="conv-inline-action"
+                        data-testid={`conversation-undo-${recentlyDeletedConversation.conversation.id}`}
+                        onClick={undoDeleteConversation}
+                      >
+                        Undo
+                      </button>
+                      <button
+                        type="button"
+                        className="conv-inline-action"
+                        data-testid={`conversation-dismiss-${recentlyDeletedConversation.conversation.id}`}
+                        onClick={dismissDeletedConversationRow}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ) : null}
+                  <div
+                    className={`conv-row ${conversation.id === activeConversationId ? 'active' : ''}`}
+                    data-testid={`conversation-row-${conversation.id}`}
+                  >
+                    {editingConversationId === conversation.id ? (
+                      <input
+                        className="conv-title-input"
+                        data-testid={`conversation-edit-${conversation.id}`}
+                        value={editingConversationTitle}
+                        onChange={(event) => setEditingConversationTitle(event.target.value)}
+                        onBlur={() => commitInlineRename(conversation.id)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            commitInlineRename(conversation.id);
+                          } else if (event.key === 'Escape') {
+                            event.preventDefault();
+                            cancelInlineRename();
+                          }
+                        }}
+                        autoFocus
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className={`conv-item ${conversation.id === activeConversationId ? 'active' : ''}`}
+                        data-testid={`conversation-open-${conversation.id}`}
+                        onClick={() => {
+                          if (conversation.id !== activeConversationId) {
+                            console.log('[UI] Loading conversation', conversation.id);
+                            setActiveConversationId(conversation.id);
+                            return;
+                          }
+                          beginInlineRename(conversation.id);
+                        }}
+                      >
+                        {conversation.title}
+                      </button>
+                    )}
                     <button
                       type="button"
-                      className={`conv-item ${conversation.id === activeConversationId ? 'active' : ''}`}
-                      data-testid={`conversation-open-${conversation.id}`}
-                      onClick={() => {
-                        if (conversation.id !== activeConversationId) {
-                          console.log('[UI] Loading conversation', conversation.id);
-                          setActiveConversationId(conversation.id);
-                          return;
-                        }
-                        beginInlineRename(conversation.id);
-                      }}
+                      className="conv-row-delete"
+                      data-testid={`conversation-delete-${conversation.id}`}
+                      onClick={() => deleteConversation(conversation.id)}
+                      aria-label={`Delete ${conversation.title}`}
                     >
-                      {conversation.title}
+                      Delete
                     </button>
-                  )}
-                </div>
+                  </div>
+                </React.Fragment>
               ))}
+              {recentlyDeletedConversation && recentlyDeletedConversation.index >= conversations.length ? (
+                <div
+                  className="conv-row conv-row-deleted"
+                  data-testid={`conversation-deleted-row-${recentlyDeletedConversation.conversation.id}`}
+                >
+                  <div className="conv-item conv-item-deleted">Deleted: {recentlyDeletedConversation.conversation.title}</div>
+                  <button
+                    type="button"
+                    className="conv-inline-action"
+                    data-testid={`conversation-undo-${recentlyDeletedConversation.conversation.id}`}
+                    onClick={undoDeleteConversation}
+                  >
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    className="conv-inline-action"
+                    data-testid={`conversation-dismiss-${recentlyDeletedConversation.conversation.id}`}
+                    onClick={dismissDeletedConversationRow}
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : null}
             </div>
 
             <div id="sidebar-bottom" />
@@ -1877,7 +2013,33 @@ export default function SearchInterface() {
           overflow: hidden;
           text-overflow: ellipsis;
         }
+        .conv-item-deleted {
+          color: #9ca3af;
+          font-style: italic;
+          background: #f3f4f6;
+        }
         .conv-item.active { background: var(--sidebar-active); color: var(--text-primary); }
+        .conv-row-delete,
+        .conv-inline-action {
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          background: #ffffff;
+          color: var(--text-secondary);
+          padding: 6px 8px;
+          font-size: 12px;
+          line-height: 1;
+          cursor: pointer;
+        }
+        .conv-row-delete:hover,
+        .conv-inline-action:hover {
+          background: var(--sidebar-hover);
+          color: var(--text-primary);
+        }
+        .conv-row-deleted {
+          border: 1px dashed #d1d5db;
+          border-radius: 10px;
+          padding: 4px;
+        }
         .conv-title-input {
           width: 100%;
           border: 1px solid #94a3b8;

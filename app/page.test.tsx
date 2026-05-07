@@ -449,4 +449,58 @@ describe('SearchInterface', () => {
     expect(screen.getByTestId(/conversation-open-/)).toHaveTextContent('Renamed search');
     expect(screen.getByTestId('chat-title')).toHaveTextContent('Renamed search');
   });
+
+  it('deletes and undoes a recent search directly in the saved search row', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/recent-searches') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({ conversations: [], activeConversationId: null }),
+        };
+      }
+
+      if (url.includes('/api/recent-searches') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: async () => ({ ok: true }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Row actions answer', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Delete this row');
+    await user.click(screen.getByTestId('send-btn'));
+    expect(await screen.findByText('Row actions answer')).toBeInTheDocument();
+
+    const rowButton = screen.getByTestId(/conversation-open-/);
+    const conversationId = rowButton.getAttribute('data-testid')?.replace('conversation-open-', '');
+    expect(conversationId).toBeTruthy();
+
+    await user.click(screen.getByTestId(`conversation-delete-${conversationId}`));
+
+    expect(screen.queryByTestId(`conversation-open-${conversationId}`)).not.toBeInTheDocument();
+    expect(screen.getByTestId(`conversation-deleted-row-${conversationId}`)).toBeInTheDocument();
+    expect(screen.getByTestId(`conversation-undo-${conversationId}`)).toBeInTheDocument();
+
+    await user.click(screen.getByTestId(`conversation-undo-${conversationId}`));
+
+    expect(screen.getByTestId(`conversation-open-${conversationId}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`conversation-deleted-row-${conversationId}`)).not.toBeInTheDocument();
+  });
 });

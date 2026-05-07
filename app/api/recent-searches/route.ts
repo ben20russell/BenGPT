@@ -33,6 +33,65 @@ type StoredRecentSearchesRecord = Record<
   }
 >;
 
+type RecentSearchesRow = {
+  client_key: string;
+  device_id: string;
+  ip_address: string;
+  conversations: StoredConversation[];
+  active_conversation_id: string | null;
+  updated_at: string;
+};
+
+type RecentSearchesSupabaseClient = {
+  from: (table: string) => {
+    select: (query: string) => {
+      eq: (column: string, value: string) => {
+        maybeSingle: <T = unknown>() => Promise<{ data: T | null; error: unknown }>;
+      };
+    };
+    upsert: (payload: unknown, options: { onConflict: string }) => Promise<{ error: unknown }>;
+  };
+};
+
+let supabaseClient: RecentSearchesSupabaseClient | null | undefined;
+
+async function getSupabaseClient(): Promise<RecentSearchesSupabaseClient | null> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
+
+  if (!supabaseUrl || !supabaseKey) {
+    if (supabaseClient !== null) {
+      console.log("[/api/recent-searches] Supabase env vars are missing; using local file storage fallback");
+    }
+    supabaseClient = null;
+    return supabaseClient;
+  }
+
+  if (typeof supabaseClient !== "undefined" && supabaseClient !== null) return supabaseClient;
+
+  try {
+    const supabaseModule = (await import("@supabase/supabase-js")) as {
+      createClient: (url: string, key: string, options: { auth: { persistSession: boolean; autoRefreshToken: boolean } }) => RecentSearchesSupabaseClient;
+    };
+    supabaseClient = supabaseModule.createClient(supabaseUrl, supabaseKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
+    console.log("[/api/recent-searches] Supabase client initialized");
+    return supabaseClient;
+  } catch (error) {
+    console.log("[/api/recent-searches] Supabase package unavailable; using local file storage fallback", {
+      error,
+    });
+    supabaseClient = null;
+    return supabaseClient;
+  }
+}
+
 function getStorePath() {
   const explicit = process.env.RECENT_SEARCHES_STORE_PATH?.trim();
   if (explicit) return explicit;
@@ -87,6 +146,63 @@ function buildClientKey(req: NextRequest): string {
   return `${ip}::${device}`;
 }
 
+async function readFromSupabase(clientKey: string): Promise<{
+  conversations: StoredConversation[];
+  activeConversationId: string | null;
+  updatedAt?: string;
+} | null> {
+  const supabase = await getSupabaseClient();
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from("recent_searches")
+    .select("conversations, active_conversation_id, updated_at")
+    .eq("client_key", clientKey)
+    .maybeSingle<Pick<RecentSearchesRow, "conversations" | "active_conversation_id" | "updated_at">>();
+
+  if (error) {
+    console.log("[/api/recent-searches] Supabase GET failed", { clientKey, error });
+    throw error;
+  }
+  if (!data) return null;
+
+  return {
+    conversations: sanitizeConversations(data.conversations),
+    activeConversationId:
+      typeof data.active_conversation_id === "string" ? data.active_conversation_id : null,
+    updatedAt: data.updated_at,
+  };
+}
+
+async function writeToSupabase(input: {
+  clientKey: string;
+  deviceId: string;
+  ipAddress: string;
+  conversations: StoredConversation[];
+  activeConversationId: string | null;
+}) {
+  const supabase = await getSupabaseClient();
+  if (!supabase) return false;
+
+  const payload: RecentSearchesRow = {
+    client_key: input.clientKey,
+    device_id: input.deviceId,
+    ip_address: input.ipAddress,
+    conversations: input.conversations,
+    active_conversation_id: input.activeConversationId,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase.from("recent_searches").upsert(payload, {
+    onConflict: "client_key",
+  });
+  if (error) {
+    console.log("[/api/recent-searches] Supabase POST failed", { clientKey: input.clientKey, error });
+    throw error;
+  }
+  return true;
+}
+
 function sanitizeConversations(raw: unknown): StoredConversation[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -126,18 +242,42 @@ function sanitizeConversations(raw: unknown): StoredConversation[] {
 export async function GET(req: NextRequest) {
   try {
     const key = buildClientKey(req);
+    const supabase = await getSupabaseClient();
     console.log("[/api/recent-searches] GET request", { key });
+    if (supabase) {
+      const existing = await readFromSupabase(key);
+      if (!existing) {
+        console.log("[/api/recent-searches] No Supabase recents found for key", { key });
+        return NextResponse.json({
+          conversations: [],
+          activeConversationId: null,
+        });
+      }
+
+      console.log("[/api/recent-searches] Returning Supabase recents", {
+        key,
+        conversations: existing.conversations.length,
+        activeConversationId: existing.activeConversationId,
+        updatedAt: existing.updatedAt,
+      });
+
+      return NextResponse.json({
+        conversations: existing.conversations,
+        activeConversationId: existing.activeConversationId,
+      });
+    }
+
     const store = await readStore();
     const existing = store[key];
     if (!existing) {
-      console.log("[/api/recent-searches] No recents found for key", { key });
+      console.log("[/api/recent-searches] No local recents found for key", { key });
       return NextResponse.json({
         conversations: [],
         activeConversationId: null,
       });
     }
 
-    console.log("[/api/recent-searches] Returning recents", {
+    console.log("[/api/recent-searches] Returning local recents", {
       key,
       conversations: existing.conversations.length,
       activeConversationId: existing.activeConversationId,
@@ -162,6 +302,8 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const ipAddress = getClientIp(req);
+    const deviceId = getDeviceId(req);
     const key = buildClientKey(req);
     const body = (await req.json()) as RecentSearchPayload;
     const conversations = sanitizeConversations(body.conversations);
@@ -170,23 +312,39 @@ export async function POST(req: NextRequest) {
 
     console.log("[/api/recent-searches] POST request", {
       key,
+      deviceId,
+      ipAddress,
       conversations: conversations.length,
       activeConversationId,
     });
 
-    const store = await readStore();
-    store[key] = {
+    const wroteToSupabase = await writeToSupabase({
+      clientKey: key,
+      deviceId,
+      ipAddress,
       conversations,
       activeConversationId,
-      updatedAt: new Date().toISOString(),
-    };
-    await writeStore(store);
-
-    console.log("[/api/recent-searches] Saved recents", {
-      key,
-      conversations: conversations.length,
-      activeConversationId,
     });
+    if (!wroteToSupabase) {
+      const store = await readStore();
+      store[key] = {
+        conversations,
+        activeConversationId,
+        updatedAt: new Date().toISOString(),
+      };
+      await writeStore(store);
+      console.log("[/api/recent-searches] Saved recents to local store", {
+        key,
+        conversations: conversations.length,
+        activeConversationId,
+      });
+    } else {
+      console.log("[/api/recent-searches] Saved recents to Supabase", {
+        key,
+        conversations: conversations.length,
+        activeConversationId,
+      });
+    }
 
     return NextResponse.json({ ok: true });
   } catch (error) {
