@@ -515,6 +515,10 @@ describe('SearchInterface', () => {
     const rowButton = screen.getByTestId(/conversation-open-/);
     const conversationId = rowButton.getAttribute('data-testid')?.replace('conversation-open-', '');
     expect(conversationId).toBeTruthy();
+    expect(screen.queryByTestId(`conversation-delete-${conversationId}`)).not.toBeInTheDocument();
+
+    await user.click(rowButton);
+    expect(screen.getByTestId(`conversation-delete-${conversationId}`)).toBeInTheDocument();
 
     await user.click(screen.getByTestId(`conversation-delete-${conversationId}`));
 

@@ -1593,15 +1593,18 @@ export default function SearchInterface() {
                         {conversation.title}
                       </button>
                     )}
-                    <button
-                      type="button"
-                      className="conv-row-delete"
-                      data-testid={`conversation-delete-${conversation.id}`}
-                      onClick={() => deleteConversation(conversation.id)}
-                      aria-label={`Delete ${conversation.title}`}
-                    >
-                      Delete
-                    </button>
+                    {editingConversationId === conversation.id ? (
+                      <button
+                        type="button"
+                        className="conv-row-delete"
+                        data-testid={`conversation-delete-${conversation.id}`}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => deleteConversation(conversation.id)}
+                        aria-label={`Delete ${conversation.title}`}
+                      >
+                        Delete
+                      </button>
+                    ) : null}
                   </div>
                 </React.Fragment>
               ))}
