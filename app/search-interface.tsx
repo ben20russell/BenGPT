@@ -1516,6 +1516,7 @@ export default function SearchInterface() {
         #main {
           flex: 1;
           min-width: 0;
+          min-height: 0;
           display: flex;
           flex-direction: column;
           overflow: hidden;
@@ -1547,7 +1548,17 @@ export default function SearchInterface() {
         }
         .top-action-btn:hover { border-color: #d1d5db; background: #f9fafb; color: var(--text-primary); }
 
-        #welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; gap: 20px; }
+        #welcome {
+          flex: 1;
+          min-height: 0;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: flex-start;
+          padding: 28px 24px;
+          gap: 20px;
+        }
         #welcome h1 { font-size: 36px; line-height: 1.1; letter-spacing: -0.02em; font-weight: 600; }
         .welcome-suggestions {
           width: 100%;
@@ -1568,7 +1579,7 @@ export default function SearchInterface() {
         }
         .suggestion-btn:hover { background: #f9fafb; color: var(--text-primary); border-color: #d1d5db; }
 
-        #messages-wrap { flex: 1; overflow-y: auto; }
+        #messages-wrap { flex: 1; min-height: 0; overflow-y: auto; }
         #messages { max-width: 840px; margin: 0 auto; padding: 22px 20px; }
         .msg-group { padding: 12px 0; }
         .user-msg { display: flex; justify-content: flex-end; margin-bottom: 12px; }
@@ -1693,6 +1704,7 @@ export default function SearchInterface() {
         .error-bubble { background: #fff3f3; border: 1px solid #f7cccc; border-radius: var(--radius-md); padding: 10px 12px; color: #c53030; }
 
         #input-area {
+          flex: 0 0 auto;
           border-top: 1px solid var(--border);
           padding: 22px 20px 28px;
           background: #ffffff;
