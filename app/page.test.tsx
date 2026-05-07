@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach } from 'vitest';
 import SearchInterface from './search-interface';
@@ -526,5 +526,82 @@ describe('SearchInterface', () => {
 
     expect(screen.getByTestId(`conversation-open-${conversationId}`)).toBeInTheDocument();
     expect(screen.queryByTestId(`conversation-deleted-row-${conversationId}`)).not.toBeInTheDocument();
+  });
+
+  it('click-tests all visible anchors end-to-end', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/recent-searches') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({ conversations: [], activeConversationId: null }),
+        };
+      }
+
+      if (url.includes('/api/recent-searches') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: async () => ({ ok: true }),
+        };
+      }
+
+      if (url.includes('/api/chat')) {
+        return {
+          ok: true,
+          json: async () => ({
+            answer: 'Here are sources.',
+            citations: [
+              { title: 'OpenAI Docs', url: 'https://platform.openai.com/docs/overview' },
+              { title: 'Supabase Docs', url: 'https://supabase.com/docs' },
+            ],
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ suggestions: ['Try this'] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Show links');
+    await user.click(screen.getByTestId('send-btn'));
+    expect(await screen.findByText('Here are sources.')).toBeInTheDocument();
+
+    const brandLink = screen.getByTestId('brand-home-link');
+    expect(brandLink).toHaveAttribute('href', '/');
+
+    const pageBottomAnchor = screen.getByTestId('page-bottom-anchor');
+    expect(pageBottomAnchor).toHaveAttribute('href', '#page-bottom-anchor');
+
+    await screen.findByText('OpenAI Docs');
+    await screen.findByText('Supabase Docs');
+    const citationLinkOne = document.querySelector(
+      'a.cite-item[href="https://platform.openai.com/docs/overview"]',
+    ) as HTMLAnchorElement | null;
+    const citationLinkTwo = document.querySelector(
+      'a.cite-item[href="https://supabase.com/docs"]',
+    ) as HTMLAnchorElement | null;
+    expect(citationLinkOne).not.toBeNull();
+    expect(citationLinkTwo).not.toBeNull();
+    expect(citationLinkOne).toHaveAttribute('href', 'https://platform.openai.com/docs/overview');
+    expect(citationLinkTwo).toHaveAttribute('href', 'https://supabase.com/docs');
+    expect(citationLinkOne).toHaveAttribute('target', '_blank');
+    expect(citationLinkTwo).toHaveAttribute('target', '_blank');
+    await user.click(citationLinkOne);
+    await user.click(citationLinkTwo);
+    fireEvent.click(pageBottomAnchor);
+    await user.click(brandLink);
+    expect(screen.getByTestId('chat-title')).toHaveTextContent('New chat');
   });
 });
