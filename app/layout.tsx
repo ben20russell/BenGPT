@@ -2,8 +2,13 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "GPT Search Personal",
-  description: "Search and research assistant UI",
+  title: "Beacon Search",
+  description: "Beacon Search research assistant UI",
+  icons: {
+    icon: "/lighthouse.svg",
+    shortcut: "/lighthouse.svg",
+    apple: "/lighthouse.svg",
+  },
 };
 
 export default function RootLayout({

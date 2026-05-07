@@ -1,13 +1,36 @@
 'use client';
 
 import React, { Component, type ErrorInfo, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import Image from 'next/image';
 
 type SearchMode = 'auto' | 'web' | 'enterprise';
-type ModelId = 'gpt-5' | 'gpt-4.1' | 'gpt-4o';
 
 type Citation = {
   url?: string;
   title?: string;
+};
+
+type UploadedContextFile = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  contentKind: 'text' | 'binary' | 'metadata_only';
+  contentText?: string;
+  contentBase64?: string;
+  note?: string;
+};
+
+type GitCodeContext = {
+  id: string;
+  label: string;
+  code: string;
+};
+
+type HistoryTurnPayload = {
+  user: string;
+  assistant: string;
+  mode: SearchMode;
 };
 
 type Turn = {
@@ -30,11 +53,332 @@ type BoundaryState = {
   message: string;
 };
 
-type StructuredBlock =
-  | { type: 'heading'; text: string }
+const FALLBACK_WELCOME_SUGGESTIONS = [
+  'Search the web for the latest AI news this week',
+  'What are the current trends in B2B SaaS marketing?',
+  'Give me a deep research report on agentic AI for enterprise',
+  'Compare voice AI platforms: RingCentral vs Dialpad vs Cisco',
+];
+
+type MarkdownBlock =
+  | { type: 'heading'; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
   | { type: 'paragraph'; text: string }
   | { type: 'ul'; items: string[] }
-  | { type: 'ol'; items: string[] };
+  | { type: 'ol'; items: string[] }
+  | { type: 'code'; language: string; code: string }
+  | { type: 'blockquote'; text: string }
+  | { type: 'hr' }
+  | { type: 'table'; headers: string[]; rows: string[][] };
+
+function splitTableCells(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+}
+
+function parseInlineMarkdown(text: string, keyPrefix = 'md'): ReactNode[] {
+  const tokenPattern =
+    /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|`([^`]+)`|\*([^*\n]+)\*|_([^_\n]+)_)/g;
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null = tokenPattern.exec(text);
+
+  while (match) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+
+    if (match[2] && match[3]) {
+      nodes.push(
+        <a
+          key={`${keyPrefix}-link-${match.index}`}
+          href={match[3]}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {parseInlineMarkdown(match[2], `${keyPrefix}-link-inner-${match.index}`)}
+        </a>,
+      );
+    } else if (match[4] || match[5]) {
+      const strongText = match[4] ?? match[5] ?? '';
+      nodes.push(
+        <strong key={`${keyPrefix}-strong-${match.index}`}>
+          {parseInlineMarkdown(strongText, `${keyPrefix}-strong-inner-${match.index}`)}
+        </strong>,
+      );
+    } else if (match[6]) {
+      nodes.push(<del key={`${keyPrefix}-del-${match.index}`}>{match[6]}</del>);
+    } else if (match[7]) {
+      nodes.push(<code key={`${keyPrefix}-code-${match.index}`}>{match[7]}</code>);
+    } else if (match[8] || match[9]) {
+      const emText = match[8] ?? match[9] ?? '';
+      nodes.push(
+        <em key={`${keyPrefix}-em-${match.index}`}>
+          {parseInlineMarkdown(emText, `${keyPrefix}-em-inner-${match.index}`)}
+        </em>,
+      );
+    }
+
+    lastIndex = tokenPattern.lastIndex;
+    match = tokenPattern.exec(text);
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+
+  return nodes.length > 0 ? nodes : [text];
+}
+
+function parseMarkdownBlocks(text: string): MarkdownBlock[] {
+  const lines = text.replaceAll('\r\n', '\n').split('\n');
+  const blocks: MarkdownBlock[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i] ?? '';
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      i += 1;
+      continue;
+    }
+
+    const fencedCodeMatch = trimmed.match(/^```([\w-]+)?\s*$/);
+    if (fencedCodeMatch) {
+      const language = fencedCodeMatch[1] ?? '';
+      i += 1;
+      const codeLines: string[] = [];
+      while (i < lines.length && !(lines[i] ?? '').trim().match(/^```/)) {
+        codeLines.push(lines[i] ?? '');
+        i += 1;
+      }
+      if (i < lines.length && (lines[i] ?? '').trim().match(/^```/)) {
+        i += 1;
+      }
+      blocks.push({ type: 'code', language, code: codeLines.join('\n') });
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      blocks.push({
+        type: 'heading',
+        level: headingMatch[1].length as 1 | 2 | 3 | 4 | 5 | 6,
+        text: headingMatch[2].trim(),
+      });
+      i += 1;
+      continue;
+    }
+
+    if (trimmed.match(/^([-*_])(?:\s*\1){2,}\s*$/)) {
+      blocks.push({ type: 'hr' });
+      i += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith('>')) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && (lines[i] ?? '').trim().startsWith('>')) {
+        quoteLines.push((lines[i] ?? '').replace(/^>\s?/, ''));
+        i += 1;
+      }
+      blocks.push({ type: 'blockquote', text: quoteLines.join('\n').trim() });
+      continue;
+    }
+
+    const nextLine = (lines[i + 1] ?? '').trim();
+    const isTable =
+      trimmed.includes('|') &&
+      nextLine.length > 0 &&
+      nextLine.match(/^\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?$/);
+
+    if (isTable) {
+      const headers = splitTableCells(trimmed);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length) {
+        const rowLine = (lines[i] ?? '').trim();
+        if (!rowLine || !rowLine.includes('|')) break;
+        rows.push(splitTableCells(rowLine));
+        i += 1;
+      }
+      blocks.push({ type: 'table', headers, rows });
+      continue;
+    }
+
+    const ulMatch = trimmed.match(/^[-*+]\s+(.+)$/);
+    if (ulMatch) {
+      const items: string[] = [];
+      while (i < lines.length) {
+        const itemMatch = (lines[i] ?? '').trim().match(/^[-*+]\s+(.+)$/);
+        if (!itemMatch) break;
+        items.push(itemMatch[1]);
+        i += 1;
+      }
+      blocks.push({ type: 'ul', items });
+      continue;
+    }
+
+    const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (olMatch) {
+      const items: string[] = [];
+      while (i < lines.length) {
+        const itemMatch = (lines[i] ?? '').trim().match(/^\d+\.\s+(.+)$/);
+        if (!itemMatch) break;
+        items.push(itemMatch[1]);
+        i += 1;
+      }
+      blocks.push({ type: 'ol', items });
+      continue;
+    }
+
+    const paragraphLines: string[] = [];
+    while (i < lines.length) {
+      const candidate = (lines[i] ?? '').trim();
+      if (!candidate) break;
+      if (
+        candidate.match(/^```/) ||
+        candidate.match(/^(#{1,6})\s+/) ||
+        candidate.match(/^[-*+]\s+/) ||
+        candidate.match(/^\d+\.\s+/) ||
+        candidate.startsWith('>') ||
+        candidate.match(/^([-*_])(?:\s*\1){2,}\s*$/)
+      ) {
+        break;
+      }
+      paragraphLines.push(candidate);
+      i += 1;
+    }
+
+    if (paragraphLines.length > 0) {
+      blocks.push({ type: 'paragraph', text: paragraphLines.join(' ') });
+      continue;
+    }
+
+    i += 1;
+  }
+
+  return blocks;
+}
+
+function isLikelyTextFile(file: File): boolean {
+  const mime = (file.type || '').toLowerCase();
+  if (mime.startsWith('text/')) return true;
+  if (
+    mime.includes('json') ||
+    mime.includes('xml') ||
+    mime.includes('yaml') ||
+    mime.includes('javascript') ||
+    mime.includes('typescript') ||
+    mime.includes('markdown')
+  ) {
+    return true;
+  }
+
+  const name = file.name.toLowerCase();
+  return /\.(txt|md|markdown|csv|json|xml|yaml|yml|js|ts|tsx|jsx|py|rb|go|rs|java|c|cpp|h|hpp|sh|sql|ini|toml|log)$/.test(
+    name,
+  );
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i] ?? 0);
+  }
+  return btoa(binary);
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function readFileAsText(file: File): Promise<string> {
+  if (typeof file.text === 'function') {
+    return file.text();
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file as text'));
+    reader.readAsText(file);
+  });
+}
+
+function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+  if (typeof file.arrayBuffer === 'function') {
+    return file.arrayBuffer();
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error('Failed to read file as ArrayBuffer'));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file as ArrayBuffer'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
+  const base: UploadedContextFile = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: file.name || 'untitled',
+    type: file.type || 'application/octet-stream',
+    size: file.size,
+    contentKind: 'metadata_only',
+  };
+
+  try {
+    if (isLikelyTextFile(file)) {
+      const text = await readFileAsText(file);
+      const maxChars = 60000;
+      const trimmed = text.length > maxChars ? text.slice(0, maxChars) : text;
+      return {
+        ...base,
+        contentKind: 'text',
+        contentText: trimmed,
+        note: text.length > maxChars ? 'Text truncated to 60,000 characters.' : undefined,
+      };
+    }
+
+    if (file.size <= 90000) {
+      const data = await readFileAsArrayBuffer(file);
+      const base64 = arrayBufferToBase64(data);
+      return {
+        ...base,
+        contentKind: 'binary',
+        contentBase64: base64,
+        note: 'Binary file included as base64 for model context.',
+      };
+    }
+
+    return {
+      ...base,
+      contentKind: 'metadata_only',
+      note: 'Large binary file included as metadata only.',
+    };
+  } catch (error) {
+    console.log('[UI] Failed to parse uploaded file', { name: file.name, error });
+    return {
+      ...base,
+      contentKind: 'metadata_only',
+      note: 'File could not be read in browser; using metadata only.',
+    };
+  }
+}
 
 function escapeHtml(text: string) {
   return text
@@ -147,12 +491,6 @@ function buildPrintableConversationHtml(
   `;
 }
 
-const MODELS: Record<ModelId, { label: string; supportsSearch: boolean }> = {
-  'gpt-5': { label: 'GPT-5', supportsSearch: true },
-  'gpt-4.1': { label: 'GPT-4.1', supportsSearch: true },
-  'gpt-4o': { label: 'GPT-4o', supportsSearch: false },
-};
-
 class UIErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> {
   constructor(props: { children: ReactNode }) {
     super(props);
@@ -199,8 +537,6 @@ export default function SearchInterface() {
   const [toast, setToast] = useState('');
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
-  const [currentModel, setCurrentModel] = useState<ModelId>('gpt-5');
   const [currentMode, setCurrentMode] = useState<SearchMode>('auto');
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -210,9 +546,15 @@ export default function SearchInterface() {
   const [isLoading, setIsLoading] = useState(false);
   const [pendingTurnId, setPendingTurnId] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedContextFile[]>([]);
+  const [gitSnippets, setGitSnippets] = useState<GitCodeContext[]>([]);
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [welcomeSuggestions, setWelcomeSuggestions] = useState<string[]>(FALLBACK_WELCOME_SUGGESTIONS);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const messageWrapRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const toolsMenuRef = useRef<HTMLDivElement>(null);
 
   const activeConversation = useMemo(
     () => conversations.find((c) => c.id === activeConversationId) ?? null,
@@ -236,6 +578,63 @@ export default function SearchInterface() {
     if (!messageWrapRef.current) return;
     messageWrapRef.current.scrollTop = messageWrapRef.current.scrollHeight;
   }, [conversations, isLoading, searching]);
+
+  useEffect(() => {
+    if (!toolsMenuOpen) return;
+
+    function onDocClick(event: MouseEvent) {
+      if (!toolsMenuRef.current) return;
+      if (!toolsMenuRef.current.contains(event.target as Node)) {
+        setToolsMenuOpen(false);
+      }
+    }
+
+    function onEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setToolsMenuOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onEscape);
+
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onEscape);
+    };
+  }, [toolsMenuOpen]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchTrendingSuggestions() {
+      try {
+        console.log('[UI] Fetching hourly trending suggestions');
+        const response = await fetch('/api/trending-prompts', { method: 'GET', cache: 'no-store' });
+        if (!response.ok) throw new Error(`status ${response.status}`);
+        const json = (await response.json()) as { suggestions?: string[] };
+        const suggestions = Array.isArray(json.suggestions)
+          ? json.suggestions.filter((item) => typeof item === 'string' && item.trim().length > 0)
+          : [];
+        if (!cancelled && suggestions.length > 0) {
+          setWelcomeSuggestions(suggestions.slice(0, 6));
+          console.log('[UI] Trending suggestions loaded', { count: suggestions.length });
+        }
+      } catch (error) {
+        console.log('[UI] Trending suggestions fetch failed, using fallback', { error });
+      }
+    }
+
+    void fetchTrendingSuggestions();
+    const hourlyTimer = window.setInterval(() => {
+      void fetchTrendingSuggestions();
+    }, 60 * 60 * 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(hourlyTimer);
+    };
+  }, []);
 
   function showToast(message: string) {
     setToast(message);
@@ -268,102 +667,90 @@ export default function SearchInterface() {
     setSearching(false);
   }
 
-  function cycleTool() {
-    const modes: SearchMode[] = ['auto', 'web', 'enterprise'];
-    const next = modes[(modes.indexOf(currentMode) + 1) % modes.length];
-    console.log('[UI] Cycling tool mode', { from: currentMode, to: next });
-    setCurrentMode(next);
+  const hasContext = uploadedFiles.length > 0 || gitSnippets.length > 0;
+
+  function buildContextSummaryText() {
+    const parts: string[] = [];
+    if (uploadedFiles.length > 0) parts.push(`${uploadedFiles.length} file${uploadedFiles.length === 1 ? '' : 's'}`);
+    if (gitSnippets.length > 0) parts.push(`${gitSnippets.length} git snippet${gitSnippets.length === 1 ? '' : 's'}`);
+    return parts.join(', ');
   }
 
-  function parseStructuredBlocks(text: string): StructuredBlock[] {
-    const lines = text.split('\n');
-    const blocks: StructuredBlock[] = [];
-    let paragraphBuffer: string[] = [];
-    let ulBuffer: string[] = [];
-    let olBuffer: string[] = [];
+  function buildTurnUserText(userText: string) {
+    if (!hasContext) return userText;
+    const contextSummary = buildContextSummaryText();
+    if (!userText) return `Shared context: ${contextSummary}`;
+    return `${userText}\n\nAttached context: ${contextSummary}`;
+  }
 
-    function flushParagraph() {
-      if (paragraphBuffer.length === 0) return;
-      blocks.push({ type: 'paragraph', text: paragraphBuffer.join(' ').trim() });
-      paragraphBuffer = [];
-    }
+  async function onFileInputChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
+    console.log('[UI] File upload started', { count: files.length });
+    const normalized = await Promise.all(files.map((file) => normalizeUploadFile(file)));
+    setUploadedFiles((prev) => [...prev, ...normalized]);
+    console.log('[UI] File upload completed', {
+      added: normalized.length,
+      kinds: normalized.map((item) => item.contentKind),
+    });
+    event.target.value = '';
+  }
 
-    function flushUl() {
-      if (ulBuffer.length === 0) return;
-      blocks.push({ type: 'ul', items: [...ulBuffer] });
-      ulBuffer = [];
-    }
+  function addGitSnippetContext() {
+    const labelRaw = window.prompt('Git file path or label (e.g. src/app.ts)');
+    const label = labelRaw?.trim();
+    if (!label) return;
+    const codeRaw = window.prompt('Paste git code snippet to include');
+    const code = codeRaw?.trim();
+    if (!code) return;
 
-    function flushOl() {
-      if (olBuffer.length === 0) return;
-      blocks.push({ type: 'ol', items: [...olBuffer] });
-      olBuffer = [];
-    }
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line) {
-        flushParagraph();
-        flushUl();
-        flushOl();
-        continue;
-      }
-
-      const bulletMatch = line.match(/^[-*]\s+(.+)$/);
-      if (bulletMatch) {
-        flushParagraph();
-        flushOl();
-        ulBuffer.push(bulletMatch[1]);
-        continue;
-      }
-
-      const numberedMatch = line.match(/^\d+\.\s+(.+)$/);
-      if (numberedMatch) {
-        flushParagraph();
-        flushUl();
-        olBuffer.push(numberedMatch[1]);
-        continue;
-      }
-
-      if (line.endsWith(':') && line.length <= 90) {
-        flushParagraph();
-        flushUl();
-        flushOl();
-        blocks.push({ type: 'heading', text: line.slice(0, -1) });
-        continue;
-      }
-
-      flushUl();
-      flushOl();
-      paragraphBuffer.push(line);
-    }
-
-    flushParagraph();
-    flushUl();
-    flushOl();
-    return blocks;
+    setGitSnippets((prev) => [
+      ...prev,
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        label,
+        code,
+      },
+    ]);
+    console.log('[UI] Added git snippet context', { label, length: code.length });
   }
 
   function renderStructuredAssistantText(text: string) {
     if (!text) return null;
-    const blocks = parseStructuredBlocks(text);
+    const blocks = parseMarkdownBlocks(text);
 
     return (
       <div className="ai-rich" data-testid="assistant-rich-output">
         {blocks.map((block, index) => {
           if (block.type === 'heading') {
-            return (
-              <h3 className="ai-section-title" key={`h-${index}`}>
-                {block.text}
-              </h3>
-            );
+            const content = parseInlineMarkdown(block.text, `h-${index}`);
+            if (block.level === 1) return <h1 key={`h-${index}`}>{content}</h1>;
+            if (block.level === 2) return <h2 key={`h-${index}`}>{content}</h2>;
+            if (block.level === 3) return <h3 key={`h-${index}`}>{content}</h3>;
+            if (block.level === 4) return <h4 key={`h-${index}`}>{content}</h4>;
+            if (block.level === 5) return <h5 key={`h-${index}`}>{content}</h5>;
+            return <h6 key={`h-${index}`}>{content}</h6>;
           }
 
           if (block.type === 'ul') {
             return (
               <ul className="ai-list ai-list-ul" key={`ul-${index}`}>
                 {block.items.map((item, itemIndex) => (
-                  <li key={`ul-${index}-${itemIndex}`}>{item}</li>
+                  <li key={`ul-${index}-${itemIndex}`}>
+                    {item.match(/^\[( |x|X)\]\s+(.+)$/) ? (
+                      <>
+                        <input
+                          type="checkbox"
+                          disabled
+                          checked={Boolean(item.match(/^\[(x|X)\]\s+/))}
+                          readOnly
+                        />
+                        <span>{parseInlineMarkdown(item.replace(/^\[( |x|X)\]\s+/, ''), `ul-${index}-${itemIndex}`)}</span>
+                      </>
+                    ) : (
+                      parseInlineMarkdown(item, `ul-${index}-${itemIndex}`)
+                    )}
+                  </li>
                 ))}
               </ul>
             );
@@ -373,15 +760,70 @@ export default function SearchInterface() {
             return (
               <ol className="ai-list ai-list-ol" key={`ol-${index}`}>
                 {block.items.map((item, itemIndex) => (
-                  <li key={`ol-${index}-${itemIndex}`}>{item}</li>
+                  <li key={`ol-${index}-${itemIndex}`}>
+                    {parseInlineMarkdown(item, `ol-${index}-${itemIndex}`)}
+                  </li>
                 ))}
               </ol>
             );
           }
 
+          if (block.type === 'code') {
+            return (
+              <pre className="ai-code-block" key={`code-${index}`}>
+                <code data-language={block.language || undefined}>{block.code}</code>
+              </pre>
+            );
+          }
+
+          if (block.type === 'blockquote') {
+            return (
+              <blockquote className="ai-blockquote" key={`quote-${index}`}>
+                {block.text.split('\n').map((quoteLine, quoteLineIndex) => (
+                  <p key={`quote-${index}-${quoteLineIndex}`}>
+                    {parseInlineMarkdown(quoteLine, `quote-${index}-${quoteLineIndex}`)}
+                  </p>
+                ))}
+              </blockquote>
+            );
+          }
+
+          if (block.type === 'hr') {
+            return <hr className="ai-hr" key={`hr-${index}`} />;
+          }
+
+          if (block.type === 'table') {
+            return (
+              <div className="ai-table-wrap" key={`table-${index}`}>
+                <table className="ai-table">
+                  <thead>
+                    <tr>
+                      {block.headers.map((header, headerIndex) => (
+                        <th key={`table-${index}-h-${headerIndex}`}>
+                          {parseInlineMarkdown(header, `table-${index}-h-${headerIndex}`)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {block.rows.map((row, rowIndex) => (
+                      <tr key={`table-${index}-r-${rowIndex}`}>
+                        {row.map((cell, cellIndex) => (
+                          <td key={`table-${index}-r-${rowIndex}-c-${cellIndex}`}>
+                            {parseInlineMarkdown(cell, `table-${index}-r-${rowIndex}-c-${cellIndex}`)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          }
+
           return (
             <p className="ai-paragraph" key={`p-${index}`}>
-              {block.text}
+              {parseInlineMarkdown(block.text, `p-${index}`)}
             </p>
           );
         })}
@@ -420,19 +862,30 @@ export default function SearchInterface() {
     }
 
     const userText = (overrideText ?? input).trim();
-    if (!userText) return;
+    if (!userText && !hasContext) return;
+
+    const filesSnapshot = [...uploadedFiles];
+    const gitSnippetsSnapshot = [...gitSnippets];
+    const renderedUserText = buildTurnUserText(userText);
 
     console.log('[UI] Sending message', {
-      model: currentModel,
       mode: currentMode,
       length: userText.length,
+      fileCount: filesSnapshot.length,
+      gitSnippetCount: gitSnippetsSnapshot.length,
     });
 
     setInput('');
     setIsLoading(true);
     setSearching(currentMode === 'web' || currentMode === 'auto');
 
-    const targetConversationId = activeConversationId ?? createConversation(userText);
+    const targetConversationId = activeConversationId ?? createConversation(userText || renderedUserText);
+    const existingTurns = conversations.find((conv) => conv.id === targetConversationId)?.turns ?? [];
+    const historyTurns: HistoryTurnPayload[] = existingTurns.slice(-8).map((turn) => ({
+      user: turn.user,
+      assistant: turn.assistant || turn.error || '',
+      mode: turn.mode,
+    }));
     const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     setPendingTurnId(turnId);
 
@@ -445,7 +898,7 @@ export default function SearchInterface() {
                 ...conv.turns,
                 {
                   id: turnId,
-                  user: userText,
+                  user: renderedUserText,
                   assistant: '',
                   citations: [],
                   mode: currentMode,
@@ -463,6 +916,20 @@ export default function SearchInterface() {
       const payload = {
         query: userText,
         forceMode: currentMode === 'auto' ? null : currentMode,
+        files: filesSnapshot.map((file) => ({
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          contentKind: file.contentKind,
+          contentText: file.contentText,
+          contentBase64: file.contentBase64,
+          note: file.note,
+        })),
+        gitSnippets: gitSnippetsSnapshot.map((snippet) => ({
+          label: snippet.label,
+          code: snippet.code,
+        })),
+        history: historyTurns,
       };
 
       console.log('[UI] POST /api/chat request', payload);
@@ -505,6 +972,8 @@ export default function SearchInterface() {
           ),
         })),
       );
+      setUploadedFiles([]);
+      setGitSnippets([]);
 
       console.log('[UI] Message completed successfully', {
         turnId,
@@ -624,7 +1093,10 @@ export default function SearchInterface() {
         <div id="app" data-testid="app-root">
           <header id="app-header" data-testid="app-header">
             <div className="app-header-inner">
-              <h1>SearchAI</h1>
+              <div className="brand-mark" data-testid="brand-mark">
+                <Image src="/lighthouse.svg" alt="Beacon Search lighthouse logo" width={30} height={30} />
+              </div>
+              <h1>Beacon Search</h1>
             </div>
           </header>
 
@@ -651,35 +1123,7 @@ export default function SearchInterface() {
               ))}
             </div>
 
-            <div id="sidebar-bottom">
-              {modelDropdownOpen ? (
-                <div className="model-dropdown open" data-testid="model-dropdown">
-                  {(Object.keys(MODELS) as ModelId[]).map((model) => (
-                    <button
-                      key={model}
-                      type="button"
-                      className={`model-option ${currentModel === model ? 'selected' : ''}`}
-                      onClick={() => {
-                        console.log('[UI] Model selected', model);
-                        setCurrentModel(model);
-                        setModelDropdownOpen(false);
-                      }}
-                    >
-                      {MODELS[model].label}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-
-              <button
-                className="model-selector"
-                data-testid="model-selector"
-                type="button"
-                onClick={() => setModelDropdownOpen((prev) => !prev)}
-              >
-                {MODELS[currentModel].label}
-              </button>
-            </div>
+            <div id="sidebar-bottom" />
           </aside>
 
           <main id="main">
@@ -726,12 +1170,7 @@ export default function SearchInterface() {
               <div id="welcome" data-testid="welcome-screen">
                 <h1>What can I help with?</h1>
                 <div className="welcome-suggestions">
-                  {[
-                    'Search the web for the latest AI news this week',
-                    'What are the current trends in B2B SaaS marketing?',
-                    'Give me a deep research report on agentic AI for enterprise',
-                    'Compare voice AI platforms: RingCentral vs Dialpad vs Cisco',
-                  ].map((suggestion) => (
+                  {welcomeSuggestions.map((suggestion) => (
                     <button
                       key={suggestion}
                       type="button"
@@ -817,6 +1256,47 @@ export default function SearchInterface() {
 
             <div id="input-area">
               <div id="input-wrapper">
+                <input
+                  ref={fileInputRef}
+                  data-testid="file-input"
+                  className="hidden-file-input"
+                  type="file"
+                  multiple
+                  onChange={onFileInputChange}
+                />
+
+                {hasContext ? (
+                  <div className="context-chips" data-testid="context-chips">
+                    {uploadedFiles.map((file) => (
+                      <div className="context-chip" key={file.id}>
+                        <span className="context-chip-label">
+                          File: {file.name} ({formatBytes(file.size)})
+                        </span>
+                        <button
+                          type="button"
+                          className="context-chip-remove"
+                          onClick={() => setUploadedFiles((prev) => prev.filter((item) => item.id !== file.id))}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+
+                    {gitSnippets.map((snippet) => (
+                      <div className="context-chip" key={snippet.id}>
+                        <span className="context-chip-label">Git: {snippet.label}</span>
+                        <button
+                          type="button"
+                          className="context-chip-remove"
+                          onClick={() => setGitSnippets((prev) => prev.filter((item) => item.id !== snippet.id))}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
                 <textarea
                   id="message-input"
                   data-testid="message-input"
@@ -833,9 +1313,78 @@ export default function SearchInterface() {
                 />
 
                 <div id="input-footer">
-                  <button type="button" className="tool-btn" onClick={cycleTool}>
-                    Search
-                  </button>
+                  <div className="tools-menu-wrap" ref={toolsMenuRef}>
+                    <button
+                      type="button"
+                      className="tool-dropdown-btn"
+                      data-testid="tools-dropdown-btn"
+                      aria-haspopup="menu"
+                      aria-expanded={toolsMenuOpen}
+                      onClick={() => setToolsMenuOpen((prev) => !prev)}
+                    >
+                      {currentMode === 'enterprise' ? 'Search: Docs' : `Search: ${currentMode[0].toUpperCase()}${currentMode.slice(1)}`}
+                      <span className="tool-caret">▾</span>
+                    </button>
+                    {toolsMenuOpen ? (
+                      <div className="tool-dropdown-menu" data-testid="tools-dropdown-menu" role="menu">
+                        <button
+                          type="button"
+                          className={`tool-dropdown-item ${currentMode === 'auto' ? 'active' : ''}`}
+                          data-testid="search-mode-auto"
+                          onClick={() => {
+                            setCurrentMode('auto');
+                            setToolsMenuOpen(false);
+                          }}
+                        >
+                          Search mode: Auto
+                        </button>
+                        <button
+                          type="button"
+                          className={`tool-dropdown-item ${currentMode === 'web' ? 'active' : ''}`}
+                          data-testid="search-mode-web"
+                          onClick={() => {
+                            setCurrentMode('web');
+                            setToolsMenuOpen(false);
+                          }}
+                        >
+                          Search mode: Web
+                        </button>
+                        <button
+                          type="button"
+                          className={`tool-dropdown-item ${currentMode === 'enterprise' ? 'active' : ''}`}
+                          data-testid="search-mode-enterprise"
+                          onClick={() => {
+                            setCurrentMode('enterprise');
+                            setToolsMenuOpen(false);
+                          }}
+                        >
+                          Search mode: Docs
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-dropdown-item"
+                          data-testid="upload-files-btn"
+                          onClick={() => {
+                            fileInputRef.current?.click();
+                            setToolsMenuOpen(false);
+                          }}
+                        >
+                          Upload file
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-dropdown-item"
+                          data-testid="add-git-code-btn"
+                          onClick={() => {
+                            addGitSnippetContext();
+                            setToolsMenuOpen(false);
+                          }}
+                        >
+                          Add git code
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
 
                   <div id="input-right">
                     <span id="char-count">{input.length > 200 ? input.length.toLocaleString() : ''}</span>
@@ -843,7 +1392,7 @@ export default function SearchInterface() {
                       id="send-btn"
                       data-testid="send-btn"
                       type="button"
-                      disabled={!isLoading && input.trim().length === 0}
+                      disabled={!isLoading && input.trim().length === 0 && !hasContext}
                       className={isLoading ? 'loading' : ''}
                       onClick={() => void sendMessage()}
                     >
@@ -853,7 +1402,7 @@ export default function SearchInterface() {
                 </div>
               </div>
               <div id="footer-note">
-                {MODELS[currentModel].label} · <span id="mode-label">{getModeLabel(currentMode)}</span>
+                <span id="mode-label">{getModeLabel(currentMode)}</span>
               </div>
             </div>
           </main>
@@ -909,9 +1458,25 @@ export default function SearchInterface() {
           height: 100%;
           display: flex;
           align-items: center;
+          gap: 10px;
           padding: 0 16px;
           max-width: 1200px;
           margin: 0 auto;
+        }
+        .brand-mark {
+          width: 30px;
+          height: 30px;
+          border-radius: 8px;
+          overflow: hidden;
+          border: 1px solid #d1d5db;
+          background: #ffffff;
+          flex: 0 0 auto;
+        }
+        .brand-mark img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
         }
         #app-header h1 {
           font-size: 18px;
@@ -929,7 +1494,7 @@ export default function SearchInterface() {
         }
         #sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
         #sidebar-top { padding: 14px; }
-        #new-chat-btn, .conv-item, .model-selector, .mode-pill, .tool-btn, .action-btn, .suggestion-btn, #send-btn, #sidebar-toggle {
+        #new-chat-btn, .conv-item, .mode-pill, .action-btn, .suggestion-btn, #send-btn, #sidebar-toggle, .tool-dropdown-btn, .tool-dropdown-item {
           cursor: pointer;
         }
         #new-chat-btn {
@@ -948,30 +1513,6 @@ export default function SearchInterface() {
         .conv-item { border: none; background: transparent; color: var(--text-secondary); padding: 8px 10px; border-radius: var(--radius-sm); text-align: left; }
         .conv-item.active { background: var(--sidebar-active); color: var(--text-primary); }
         #sidebar-bottom { padding: 12px; border-top: 1px solid var(--border); position: relative; }
-        .model-selector, .model-option {
-          width: 100%;
-          border: 1px solid var(--border);
-          background: #ffffff;
-          color: var(--text-primary);
-          border-radius: 10px;
-          padding: 9px 10px;
-        }
-        .model-dropdown {
-          position: absolute;
-          bottom: 62px;
-          left: 12px;
-          right: 12px;
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-          background: #ffffff;
-          border: 1px solid var(--border);
-          padding: 8px;
-          border-radius: var(--radius-md);
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
-        }
-        .model-option.selected { outline: 1px solid var(--accent); background: #f0fdf9; }
-
         #main {
           flex: 1;
           display: flex;
@@ -1040,19 +1581,64 @@ export default function SearchInterface() {
         .ai-msg { display: flex; }
         .ai-content { width: 100%; }
         .ai-text {
-          white-space: pre-wrap;
           line-height: 1.72;
           font-size: 16px;
           color: #111827;
         }
         .ai-rich { display: flex; flex-direction: column; gap: 10px; }
-        .ai-section-title {
-          font-size: 15px;
-          font-weight: 700;
-          color: var(--text-primary);
-          margin-top: 2px;
-        }
         .ai-paragraph { margin: 0; color: #111827; }
+        .ai-rich h1, .ai-rich h2, .ai-rich h3, .ai-rich h4, .ai-rich h5, .ai-rich h6 {
+          color: var(--text-primary);
+          font-weight: 700;
+          line-height: 1.25;
+          margin: 2px 0 0;
+        }
+        .ai-rich h1 { font-size: 1.55rem; }
+        .ai-rich h2 { font-size: 1.4rem; }
+        .ai-rich h3 { font-size: 1.24rem; }
+        .ai-rich h4 { font-size: 1.12rem; }
+        .ai-rich h5, .ai-rich h6 { font-size: 1rem; }
+        .ai-rich p { margin: 0; }
+        .ai-rich a { color: #0f766e; text-decoration: underline; text-underline-offset: 2px; }
+        .ai-rich a:hover { color: #0d9488; }
+        .ai-rich code {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+          font-size: 0.92em;
+          background: #f3f4f6;
+          border: 1px solid #e5e7eb;
+          border-radius: 6px;
+          padding: 1px 6px;
+        }
+        .ai-code-block {
+          margin: 0;
+          border: 1px solid #e5e7eb;
+          background: #f8fafc;
+          border-radius: 10px;
+          padding: 12px 14px;
+          overflow-x: auto;
+        }
+        .ai-code-block code {
+          display: block;
+          background: transparent;
+          border: none;
+          border-radius: 0;
+          padding: 0;
+          white-space: pre;
+        }
+        .ai-blockquote {
+          margin: 0;
+          padding: 8px 12px;
+          border-left: 3px solid #cbd5e1;
+          color: #374151;
+          background: #f8fafc;
+        }
+        .ai-blockquote p + p { margin-top: 8px; }
+        .ai-hr {
+          border: none;
+          height: 1px;
+          background: #e5e7eb;
+          margin: 2px 0;
+        }
         .ai-list {
           margin: 0;
           padding-left: 22px;
@@ -1061,8 +1647,23 @@ export default function SearchInterface() {
           gap: 6px;
         }
         .ai-list li { color: #111827; }
+        .ai-list li input[type="checkbox"] { margin-right: 8px; }
         .ai-list-ol { list-style-type: decimal; }
         .ai-list-ul { list-style-type: disc; }
+        .ai-table-wrap { overflow-x: auto; }
+        .ai-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 14px;
+          border: 1px solid #e5e7eb;
+        }
+        .ai-table th, .ai-table td {
+          border: 1px solid #e5e7eb;
+          padding: 7px 9px;
+          text-align: left;
+          vertical-align: top;
+        }
+        .ai-table th { background: #f8fafc; color: #111827; font-weight: 600; }
         .search-indicator { color: var(--accent); font-size: 13px; margin-bottom: 8px; font-weight: 600; }
         .source-bar { margin-top: 10px; display: flex; gap: 6px; }
         .source-pill { font-size: 11px; border-radius: 20px; padding: 2px 9px; border: 1px solid #d1fae5; background: #ecfdf5; color: #047857; }
@@ -1106,6 +1707,39 @@ export default function SearchInterface() {
           gap: 8px;
           box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
         }
+        .hidden-file-input { display: none; }
+        .context-chips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+        .context-chip {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          border: 1px solid #d1d5db;
+          border-radius: 999px;
+          background: #f8fafc;
+          color: #334155;
+          max-width: 100%;
+          padding: 4px 9px;
+        }
+        .context-chip-label {
+          max-width: 340px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          font-size: 12px;
+        }
+        .context-chip-remove {
+          border: none;
+          background: transparent;
+          color: #64748b;
+          cursor: pointer;
+          line-height: 1;
+          font-size: 14px;
+        }
+        .context-chip-remove:hover { color: #0f172a; }
         #message-input {
           width: 100%;
           background: transparent;
@@ -1119,8 +1753,51 @@ export default function SearchInterface() {
           line-height: 1.5;
         }
         #message-input::placeholder { color: #9ca3af; }
-        #input-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-        .tool-btn { border: none; color: var(--text-tertiary); background: transparent; padding: 5px 7px; border-radius: var(--radius-sm); }
+        #input-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+        .tools-menu-wrap { position: relative; }
+        .tool-dropdown-btn {
+          border: 1px solid #d1d5db;
+          background: #ffffff;
+          color: #0f172a;
+          border-radius: 999px;
+          padding: 6px 12px;
+          font-size: 13px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .tool-dropdown-btn:hover { background: #f8fafc; border-color: #cbd5e1; }
+        .tool-caret { color: #64748b; font-size: 12px; }
+        .tool-dropdown-menu {
+          position: absolute;
+          left: 0;
+          bottom: calc(100% + 8px);
+          min-width: 220px;
+          border: 1px solid #d1d5db;
+          border-radius: 12px;
+          background: #ffffff;
+          box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
+          padding: 6px;
+          z-index: 120;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .tool-dropdown-item {
+          border: none;
+          background: transparent;
+          color: #0f172a;
+          text-align: left;
+          font-size: 13px;
+          padding: 9px 10px;
+          border-radius: 8px;
+        }
+        .tool-dropdown-item:hover { background: #f8fafc; }
+        .tool-dropdown-item.active {
+          background: #ecfdf5;
+          color: #047857;
+          font-weight: 600;
+        }
         #input-right { display: flex; align-items: center; gap: 8px; }
         #char-count { font-size: 11px; color: var(--text-tertiary); }
         #send-btn { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--send-bg); color: var(--send-color); }
