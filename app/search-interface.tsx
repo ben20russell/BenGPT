@@ -581,19 +581,41 @@ export default function SearchInterface() {
     const title = activeConversation?.title || 'New chat';
     const exportedAt = new Date().toLocaleString();
     const printable = buildPrintableConversationHtml(title, turns, exportedAt, getModeLabel);
-    const printWindow = window.open('', '_blank', 'noopener,noreferrer,width=920,height=900');
+    const printWindow = window.open('about:blank', '_blank');
     if (!printWindow) {
       console.log('[UI] PDF export failed: popup blocked');
       showToast('Enable popups to export PDF');
       return;
     }
 
-    printWindow.document.write(printable);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
-    console.log('[UI] PDF export print dialog requested');
-    showToast('Print dialog opened. Choose Save as PDF.');
+    try {
+      if (typeof printWindow.document.open === 'function') {
+        printWindow.document.open();
+      }
+      printWindow.document.write(printable);
+      printWindow.document.close();
+      printWindow.focus();
+
+      // Safari can show a blank about:blank tab if print is triggered too early.
+      let didPrint = false;
+      const runPrint = () => {
+        if (didPrint) return;
+        didPrint = true;
+        console.log('[UI] PDF export print dialog requested');
+        printWindow.print();
+        showToast('Print dialog opened. Choose Save as PDF.');
+      };
+
+      if (printWindow.document.readyState === 'complete') {
+        window.setTimeout(runPrint, 120);
+      } else {
+        printWindow.onload = () => window.setTimeout(runPrint, 120);
+      }
+      window.setTimeout(runPrint, 400);
+    } catch (error) {
+      console.log('[UI] PDF export failed while writing print window', { error });
+      showToast('Unable to render PDF export. Please try again.');
+    }
   }
 
   return (

@@ -116,10 +116,11 @@ describe('SearchInterface', () => {
     await user.click(screen.getByTestId('pdf-export-btn'));
 
     expect(openMock).toHaveBeenCalledTimes(1);
+    expect(openMock).toHaveBeenCalledWith('about:blank', '_blank');
     expect(writeMock).toHaveBeenCalledTimes(1);
     expect(closeMock).toHaveBeenCalledTimes(1);
     expect(focusMock).toHaveBeenCalledTimes(1);
-    expect(printMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(printMock).toHaveBeenCalledTimes(1));
 
     const html = String(writeMock.mock.calls[0]?.[0] ?? '');
     expect(html).toContain('Create exportable response');
