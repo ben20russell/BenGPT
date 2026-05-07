@@ -617,7 +617,7 @@ export default function SearchInterface() {
           ? json.suggestions.filter((item) => typeof item === 'string' && item.trim().length > 0)
           : [];
         if (!cancelled && suggestions.length > 0) {
-          setWelcomeSuggestions(suggestions.slice(0, 6));
+          setWelcomeSuggestions(suggestions.slice(0, 4));
           console.log('[UI] Trending suggestions loaded', { count: suggestions.length });
         }
       } catch (error) {
@@ -1575,6 +1575,7 @@ export default function SearchInterface() {
           padding: 14px 16px;
           text-align: left;
           min-height: 84px;
+          font-size: 14px;
           line-height: 1.35;
         }
         .suggestion-btn:hover { background: #f9fafb; color: var(--text-primary); border-color: #d1d5db; }

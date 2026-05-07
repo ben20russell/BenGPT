@@ -101,7 +101,7 @@ function buildPromptsFromHeadlines(headlines: string[], now: Date): string[] {
     .slice(0, 50);
   const prompts: string[] = [];
 
-  while (prompts.length < 6 && deduped.length > 0) {
+  while (prompts.length < 4 && deduped.length > 0) {
     const headlineIndex = Math.floor(random() * deduped.length);
     const templateIndex = Math.floor(random() * templates.length);
     const headline = deduped.splice(headlineIndex, 1)[0];
