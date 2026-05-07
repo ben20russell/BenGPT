@@ -31,7 +31,7 @@
 - It uses the `openai` npm package configured for Azure (`AzureOpenAI` client)
 - All structured outputs use Zod schemas + `zodResponseFormat`
 - Environment variables are injected at build time via `vite.config.ts` `define` block
-- Required env vars: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT_NAME`
+- Required env vars: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT`
 
 ## Unit Testing Strategy
 

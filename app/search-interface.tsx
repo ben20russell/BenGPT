@@ -3,7 +3,14 @@
 import React, { Component, type ErrorInfo, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 
-type SearchMode = 'auto' | 'web' | 'enterprise';
+type SearchMode = 'quick' | 'web_search' | 'thinking' | 'deep_research';
+
+const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string }> = [
+  { value: 'quick', label: 'Quick' },
+  { value: 'web_search', label: 'Web Search' },
+  { value: 'thinking', label: 'Thinking' },
+  { value: 'deep_research', label: 'Deep Research' },
+];
 
 type Citation = {
   url?: string;
@@ -15,7 +22,7 @@ type UploadedContextFile = {
   name: string;
   type: string;
   size: number;
-  contentKind: 'text' | 'binary' | 'metadata_only';
+  contentKind: 'text' | 'binary';
   contentText?: string;
   contentBase64?: string;
   note?: string;
@@ -338,7 +345,7 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
     name: file.name || 'untitled',
     type: file.type || 'application/octet-stream',
     size: file.size,
-    contentKind: 'metadata_only',
+    contentKind: 'binary',
   };
 
   try {
@@ -354,29 +361,29 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
       };
     }
 
-    if (file.size <= 90000) {
-      const data = await readFileAsArrayBuffer(file);
-      const base64 = arrayBufferToBase64(data);
-      return {
-        ...base,
-        contentKind: 'binary',
-        contentBase64: base64,
-        note: 'Binary file included as base64 for model context.',
-      };
-    }
-
+    const data = await readFileAsArrayBuffer(file);
+    const base64 = arrayBufferToBase64(data);
     return {
       ...base,
-      contentKind: 'metadata_only',
-      note: 'Large binary file included as metadata only.',
+      contentKind: 'binary',
+      contentBase64: base64,
+      note: 'Binary file included as base64 for model context.',
     };
   } catch (error) {
     console.log('[UI] Failed to parse uploaded file', { name: file.name, error });
-    return {
-      ...base,
-      contentKind: 'metadata_only',
-      note: 'File could not be read in browser; using metadata only.',
-    };
+    const fallbackText = await readFileAsText(file).catch(() => '');
+    if (fallbackText) {
+      const maxChars = 60000;
+      const trimmed = fallbackText.length > maxChars ? fallbackText.slice(0, maxChars) : fallbackText;
+      return {
+        ...base,
+        contentKind: 'text',
+        contentText: trimmed,
+        note: fallbackText.length > maxChars ? 'Text truncated to 60,000 characters.' : 'Read as plain text fallback.',
+      };
+    }
+
+    throw new Error(`Could not read uploaded file content: ${file.name}`);
   }
 }
 
@@ -535,12 +542,13 @@ class UIErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> 
 
 export default function SearchInterface() {
   const [toast, setToast] = useState('');
+  const [isUiBooted, setIsUiBooted] = useState(process.env.NODE_ENV === 'test');
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [currentMode, setCurrentMode] = useState<SearchMode>('auto');
-
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [editingConversationId, setEditingConversationId] = useState<string | null>(null);
+  const [editingConversationTitle, setEditingConversationTitle] = useState('');
 
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -549,6 +557,7 @@ export default function SearchInterface() {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedContextFile[]>([]);
   const [gitSnippets, setGitSnippets] = useState<GitCodeContext[]>([]);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [searchMode, setSearchMode] = useState<SearchMode>('quick');
   const [welcomeSuggestions, setWelcomeSuggestions] = useState<string[]>(FALLBACK_WELCOME_SUGGESTIONS);
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -560,9 +569,16 @@ export default function SearchInterface() {
     () => conversations.find((c) => c.id === activeConversationId) ?? null,
     [conversations, activeConversationId],
   );
+  const hasResults = Boolean(activeConversation && activeConversation.turns.length > 0);
 
   useEffect(() => {
     console.log('[UI] Component mounted');
+    if (process.env.NODE_ENV === 'test') return;
+    const bootTimer = window.setTimeout(() => {
+      setIsUiBooted(true);
+      console.log('[UI] Initial paint lock released');
+    }, 0);
+    return () => window.clearTimeout(bootTimer);
   }, []);
 
   useEffect(() => {
@@ -610,7 +626,9 @@ export default function SearchInterface() {
     async function fetchTrendingSuggestions() {
       try {
         console.log('[UI] Fetching hourly trending suggestions');
-        const response = await fetch('/api/trending-prompts', { method: 'GET', cache: 'no-store' });
+        const endpoint =
+          process.env.NODE_ENV === 'test' ? 'http://localhost/api/trending-prompts' : '/api/trending-prompts';
+        const response = await fetch(endpoint, { method: 'GET', cache: 'no-store' });
         if (!response.ok) throw new Error(`status ${response.status}`);
         const json = (await response.json()) as { suggestions?: string[] };
         const suggestions = Array.isArray(json.suggestions)
@@ -641,9 +659,12 @@ export default function SearchInterface() {
   }
 
   function getModeLabel(mode: SearchMode) {
-    if (mode === 'web') return 'Web search active';
-    if (mode === 'enterprise') return 'Docs mode';
-    return 'Auto-routing enabled';
+    const selected = SEARCH_MODE_OPTIONS.find((option) => option.value === mode);
+    if (!selected) {
+      console.log('[UI] Unexpected mode value encountered; defaulting to Quick', mode);
+      return 'Quick';
+    }
+    return selected.label;
   }
 
   function createConversation(title: string): string {
@@ -667,6 +688,67 @@ export default function SearchInterface() {
     setSearching(false);
   }
 
+  function renameConversation(conversationId: string, nextTitleRaw: string) {
+    const conversation = conversations.find((item) => item.id === conversationId);
+    if (!conversation) {
+      console.log('[UI] Rename skipped: conversation not found', { conversationId });
+      return;
+    }
+
+    const nextTitle = nextTitleRaw.trim();
+    if (!nextTitle) {
+      console.log('[UI] Rename rejected: empty title', { conversationId });
+      showToast('Please enter a non-empty title');
+      return;
+    }
+
+    if (nextTitle === conversation.title) {
+      console.log('[UI] Rename skipped: title unchanged', { conversationId, title: nextTitle });
+      return;
+    }
+
+    console.log('[UI] Renaming conversation', {
+      conversationId,
+      previousTitle: conversation.title,
+      nextTitle,
+    });
+    setConversations((prev) =>
+      prev.map((item) =>
+        item.id === conversationId
+          ? {
+              ...item,
+              title: nextTitle,
+            }
+          : item,
+      ),
+    );
+    showToast('Recent search renamed');
+  }
+
+  function beginInlineRename(conversationId: string) {
+    const conversation = conversations.find((item) => item.id === conversationId);
+    if (!conversation) {
+      console.log('[UI] Inline rename start skipped: conversation not found', { conversationId });
+      return;
+    }
+    console.log('[UI] Inline rename started', { conversationId, title: conversation.title });
+    setEditingConversationId(conversationId);
+    setEditingConversationTitle(conversation.title);
+  }
+
+  function cancelInlineRename() {
+    if (!editingConversationId) return;
+    console.log('[UI] Inline rename cancelled', { conversationId: editingConversationId });
+    setEditingConversationId(null);
+    setEditingConversationTitle('');
+  }
+
+  function commitInlineRename(conversationId: string) {
+    renameConversation(conversationId, editingConversationTitle);
+    setEditingConversationId(null);
+    setEditingConversationTitle('');
+  }
+
   const hasContext = uploadedFiles.length > 0 || gitSnippets.length > 0;
 
   function buildContextSummaryText() {
@@ -687,11 +769,22 @@ export default function SearchInterface() {
     const files = Array.from(event.target.files ?? []);
     if (files.length === 0) return;
     console.log('[UI] File upload started', { count: files.length });
-    const normalized = await Promise.all(files.map((file) => normalizeUploadFile(file)));
-    setUploadedFiles((prev) => [...prev, ...normalized]);
+    const results = await Promise.allSettled(files.map((file) => normalizeUploadFile(file)));
+    const normalized = results
+      .filter((result): result is PromiseFulfilledResult<UploadedContextFile> => result.status === 'fulfilled')
+      .map((result) => result.value);
+    const failures = results.filter((result) => result.status === 'rejected').length;
+
+    if (normalized.length > 0) {
+      setUploadedFiles((prev) => [...prev, ...normalized]);
+    }
+    if (failures > 0) {
+      showToast(`Could not read ${failures} file${failures === 1 ? '' : 's'}. Try re-uploading.`);
+    }
     console.log('[UI] File upload completed', {
       added: normalized.length,
       kinds: normalized.map((item) => item.contentKind),
+      failures,
     });
     event.target.value = '';
   }
@@ -713,6 +806,14 @@ export default function SearchInterface() {
       },
     ]);
     console.log('[UI] Added git snippet context', { label, length: code.length });
+  }
+
+  function showMoreRouteInfo() {
+    const route = window.location.pathname || '/';
+    const turns = activeConversation?.turns.length ?? 0;
+    const details = `Route: ${route} · Turns: ${turns} · Mode: ${getModeLabel(searchMode)}`;
+    console.log('[UI] More Route Info requested', { route, turns, mode: searchMode });
+    showToast(details);
   }
 
   function renderStructuredAssistantText(text: string) {
@@ -869,7 +970,7 @@ export default function SearchInterface() {
     const renderedUserText = buildTurnUserText(userText);
 
     console.log('[UI] Sending message', {
-      mode: currentMode,
+      mode: searchMode,
       length: userText.length,
       fileCount: filesSnapshot.length,
       gitSnippetCount: gitSnippetsSnapshot.length,
@@ -877,7 +978,7 @@ export default function SearchInterface() {
 
     setInput('');
     setIsLoading(true);
-    setSearching(currentMode === 'web' || currentMode === 'auto');
+    setSearching(true);
 
     const targetConversationId = activeConversationId ?? createConversation(userText || renderedUserText);
     const existingTurns = conversations.find((conv) => conv.id === targetConversationId)?.turns ?? [];
@@ -901,7 +1002,7 @@ export default function SearchInterface() {
                   user: renderedUserText,
                   assistant: '',
                   citations: [],
-                  mode: currentMode,
+                  mode: searchMode,
                 },
               ],
             }
@@ -915,7 +1016,7 @@ export default function SearchInterface() {
 
       const payload = {
         query: userText,
-        forceMode: currentMode === 'auto' ? null : currentMode,
+        mode: searchMode,
         files: filesSnapshot.map((file) => ({
           name: file.name,
           type: file.type,
@@ -1089,14 +1190,14 @@ export default function SearchInterface() {
 
   return (
     <UIErrorBoundary>
-      <div className="search-ui" data-testid="search-ui-root">
+      <div className={`search-ui ${isUiBooted ? 'booted' : 'booting'}`} data-testid="search-ui-root">
         <div id="app" data-testid="app-root">
           <header id="app-header" data-testid="app-header">
             <div className="app-header-inner">
               <div className="brand-mark" data-testid="brand-mark">
                 <Image src="/lighthouse.svg" alt="Beacon Search lighthouse logo" width={30} height={30} />
               </div>
-              <h1>Beacon Search</h1>
+              <h1>Beacon Search AI</h1>
             </div>
           </header>
 
@@ -1106,20 +1207,50 @@ export default function SearchInterface() {
                 New chat
               </button>
             </div>
-            <div className="sidebar-section-label">Recent</div>
+            <div className="sidebar-section-label">Recents</div>
             <div id="conv-list" data-testid="conv-list">
               {conversations.map((conversation) => (
-                <button
+                <div
                   key={conversation.id}
-                  type="button"
-                  className={`conv-item ${conversation.id === activeConversationId ? 'active' : ''}`}
-                  onClick={() => {
-                    console.log('[UI] Loading conversation', conversation.id);
-                    setActiveConversationId(conversation.id);
-                  }}
+                  className={`conv-row ${conversation.id === activeConversationId ? 'active' : ''}`}
+                  data-testid={`conversation-row-${conversation.id}`}
                 >
-                  {conversation.title}
-                </button>
+                  {editingConversationId === conversation.id ? (
+                    <input
+                      className="conv-title-input"
+                      data-testid={`conversation-edit-${conversation.id}`}
+                      value={editingConversationTitle}
+                      onChange={(event) => setEditingConversationTitle(event.target.value)}
+                      onBlur={() => commitInlineRename(conversation.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          commitInlineRename(conversation.id);
+                        } else if (event.key === 'Escape') {
+                          event.preventDefault();
+                          cancelInlineRename();
+                        }
+                      }}
+                      autoFocus
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className={`conv-item ${conversation.id === activeConversationId ? 'active' : ''}`}
+                      data-testid={`conversation-open-${conversation.id}`}
+                      onClick={() => {
+                        if (conversation.id !== activeConversationId) {
+                          console.log('[UI] Loading conversation', conversation.id);
+                          setActiveConversationId(conversation.id);
+                          return;
+                        }
+                        beginInlineRename(conversation.id);
+                      }}
+                    >
+                      {conversation.title}
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
 
@@ -1139,36 +1270,24 @@ export default function SearchInterface() {
               >
                 ☰
               </button>
-              <span id="chat-title">{activeConversation?.title ?? 'New chat'}</span>
-              <div id="mode-pills" data-testid="mode-pills">
-                {(['auto', 'web', 'enterprise'] as SearchMode[]).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={`mode-pill ${currentMode === mode ? 'active' : ''}`}
-                    data-testid={`mode-${mode}`}
-                    onClick={() => {
-                      console.log('[UI] Mode selected', mode);
-                      setCurrentMode(mode);
-                    }}
-                  >
-                    {mode === 'enterprise' ? 'Docs' : mode[0].toUpperCase() + mode.slice(1)}
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                className="top-action-btn"
-                data-testid="pdf-export-btn"
-                onClick={exportConversationToPdf}
-              >
-                Export PDF
-              </button>
+              <span id="chat-title" data-testid="chat-title">
+                {activeConversation?.title ?? 'New chat'}
+              </span>
+              {hasResults ? (
+                <button
+                  type="button"
+                  className="top-action-btn"
+                  data-testid="pdf-export-btn"
+                  onClick={exportConversationToPdf}
+                >
+                  Export PDF
+                </button>
+              ) : null}
             </div>
 
             {!activeConversation || activeConversation.turns.length === 0 ? (
               <div id="welcome" data-testid="welcome-screen">
-                <h1>What can I help with?</h1>
+                <h1 data-testid="welcome-heading">Ask me anything!</h1>
                 <div className="welcome-suggestions">
                   {welcomeSuggestions.map((suggestion) => (
                     <button
@@ -1214,9 +1333,7 @@ export default function SearchInterface() {
                           )}
 
                           <div className="source-bar">
-                            <span className={`source-pill ${turn.mode === 'web' ? 'web' : turn.mode === 'enterprise' ? 'enterprise' : 'auto'}`}>
-                              {turn.mode === 'web' ? 'Web search' : turn.mode === 'enterprise' ? 'Docs mode' : 'Auto-routed'}
-                            </span>
+                            <span className={`source-pill mode-${turn.mode}`}>{getModeLabel(turn.mode)}</span>
                           </div>
 
                           {turn.citations.length > 0 ? (
@@ -1302,7 +1419,7 @@ export default function SearchInterface() {
                   data-testid="message-input"
                   value={input}
                   placeholder="Ask anything..."
-                  rows={1}
+                  rows={2}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' && !event.shiftKey) {
@@ -1322,44 +1439,27 @@ export default function SearchInterface() {
                       aria-expanded={toolsMenuOpen}
                       onClick={() => setToolsMenuOpen((prev) => !prev)}
                     >
-                      {currentMode === 'enterprise' ? 'Search: Docs' : `Search: ${currentMode[0].toUpperCase()}${currentMode.slice(1)}`}
-                      <span className="tool-caret">▾</span>
+                      <span className="plus-glyph" aria-hidden="true">
+                        +
+                      </span>
                     </button>
                     {toolsMenuOpen ? (
                       <div className="tool-dropdown-menu" data-testid="tools-dropdown-menu" role="menu">
-                        <button
-                          type="button"
-                          className={`tool-dropdown-item ${currentMode === 'auto' ? 'active' : ''}`}
-                          data-testid="search-mode-auto"
-                          onClick={() => {
-                            setCurrentMode('auto');
-                            setToolsMenuOpen(false);
-                          }}
-                        >
-                          Search mode: Auto
-                        </button>
-                        <button
-                          type="button"
-                          className={`tool-dropdown-item ${currentMode === 'web' ? 'active' : ''}`}
-                          data-testid="search-mode-web"
-                          onClick={() => {
-                            setCurrentMode('web');
-                            setToolsMenuOpen(false);
-                          }}
-                        >
-                          Search mode: Web
-                        </button>
-                        <button
-                          type="button"
-                          className={`tool-dropdown-item ${currentMode === 'enterprise' ? 'active' : ''}`}
-                          data-testid="search-mode-enterprise"
-                          onClick={() => {
-                            setCurrentMode('enterprise');
-                            setToolsMenuOpen(false);
-                          }}
-                        >
-                          Search mode: Docs
-                        </button>
+                        {SEARCH_MODE_OPTIONS.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={`tool-dropdown-item ${searchMode === option.value ? 'active' : ''}`}
+                            data-testid={`search-mode-option-${option.value}`}
+                            onClick={() => {
+                              console.log('[UI] Search mode changed', { mode: option.value });
+                              setSearchMode(option.value);
+                              setToolsMenuOpen(false);
+                            }}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
                         <button
                           type="button"
                           className="tool-dropdown-item"
@@ -1382,6 +1482,17 @@ export default function SearchInterface() {
                         >
                           Add git code
                         </button>
+                        <button
+                          type="button"
+                          className="tool-dropdown-item"
+                          data-testid="more-route-info-btn"
+                          onClick={() => {
+                            showMoreRouteInfo();
+                            setToolsMenuOpen(false);
+                          }}
+                        >
+                          More Route Info
+                        </button>
                       </div>
                     ) : null}
                   </div>
@@ -1396,15 +1507,25 @@ export default function SearchInterface() {
                       className={isLoading ? 'loading' : ''}
                       onClick={() => void sendMessage()}
                     >
-                      {isLoading ? '■' : '↑'}
+                      {isLoading ? (
+                        '■'
+                      ) : (
+                        <span className="send-glyph" aria-hidden="true">
+                          ↑
+                        </span>
+                      )}
                     </button>
                   </div>
                 </div>
               </div>
               <div id="footer-note">
-                <span id="mode-label">{getModeLabel(currentMode)}</span>
+                <span id="mode-label">{getModeLabel(searchMode)}</span>
               </div>
+              <p className="subheader-copy text-xs text-zinc-400 text-center mt-2">
+                AI models can make mistakes. Always double check your work. Remember to think critically.
+              </p>
             </div>
+            <a id="page-bottom-anchor" data-testid="page-bottom-anchor" href="#page-bottom-anchor" aria-label="Bottom of page" />
           </main>
         </div>
 
@@ -1413,7 +1534,7 @@ export default function SearchInterface() {
         </div>
       </div>
 
-      <style jsx global>{`
+      <style>{`
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         :root {
           --bg: #ffffff;
@@ -1441,8 +1562,10 @@ export default function SearchInterface() {
           overflow: hidden;
           background: var(--bg);
           color: var(--text-primary);
-          font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+          font-family: "Soehne", "Helvetica Neue", Helvetica, Arial, sans-serif;
         }
+        .search-ui.booting #app { visibility: hidden; }
+        .search-ui.booted #app { visibility: visible; }
         #app { display: flex; height: 100vh; overflow: hidden; padding-top: 56px; position: relative; }
         #app-header {
           position: fixed;
@@ -1459,9 +1582,7 @@ export default function SearchInterface() {
           display: flex;
           align-items: center;
           gap: 10px;
-          padding: 0 16px;
-          max-width: 1200px;
-          margin: 0 auto;
+          padding: 0 14px;
         }
         .brand-mark {
           width: 30px;
@@ -1493,7 +1614,7 @@ export default function SearchInterface() {
           border-right: 1px solid var(--border);
         }
         #sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
-        #sidebar-top { padding: 14px; }
+        #sidebar-top { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
         #new-chat-btn, .conv-item, .mode-pill, .action-btn, .suggestion-btn, #send-btn, #sidebar-toggle, .tool-dropdown-btn, .tool-dropdown-item {
           cursor: pointer;
         }
@@ -1510,8 +1631,32 @@ export default function SearchInterface() {
         #new-chat-btn:hover, .conv-item:hover { background: var(--sidebar-hover); color: var(--text-primary); }
         .sidebar-section-label { padding: 10px 14px; font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.04em; }
         #conv-list { flex: 1; overflow-y: auto; padding: 0 6px 8px; display: flex; flex-direction: column; gap: 4px; }
-        .conv-item { border: none; background: transparent; color: var(--text-secondary); padding: 8px 10px; border-radius: var(--radius-sm); text-align: left; }
+        .conv-row { display: flex; align-items: center; gap: 6px; }
+        .conv-item {
+          flex: 1;
+          min-width: 0;
+          border: none;
+          background: transparent;
+          color: var(--text-secondary);
+          padding: 8px 10px;
+          border-radius: var(--radius-sm);
+          text-align: left;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
         .conv-item.active { background: var(--sidebar-active); color: var(--text-primary); }
+        .conv-title-input {
+          width: 100%;
+          border: 1px solid #94a3b8;
+          border-radius: var(--radius-sm);
+          background: #ffffff;
+          color: var(--text-primary);
+          padding: 7px 9px;
+          font-size: 14px;
+          line-height: 1.3;
+          outline: none;
+        }
         #sidebar-bottom { padding: 12px; border-top: 1px solid var(--border); position: relative; }
         #main {
           flex: 1;
@@ -1529,14 +1674,11 @@ export default function SearchInterface() {
           flex-wrap: wrap;
           gap: 8px;
           padding: 12px 16px;
-          border-bottom: 1px solid var(--border);
+          border-bottom: 1px solid transparent;
           background: #ffffff;
         }
         #sidebar-toggle { background: transparent; border: none; color: var(--text-secondary); }
         #chat-title { flex: 1; min-width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
-        #mode-pills { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; border-radius: 20px; border: 1px solid var(--border); background: #f7f7f7; }
-        .mode-pill { border: none; background: transparent; color: var(--text-secondary); padding: 4px 12px; border-radius: 20px; }
-        .mode-pill.active { color: #ffffff; background: var(--accent); }
         .top-action-btn {
           border: 1px solid var(--border);
           background: #ffffff;
@@ -1555,28 +1697,28 @@ export default function SearchInterface() {
           display: flex;
           flex-direction: column;
           align-items: center;
-          justify-content: flex-start;
-          padding: 28px 24px;
-          gap: 20px;
+          justify-content: center;
+          padding: 28px 24px 8px;
+          gap: 28px;
         }
-        #welcome h1 { font-size: 36px; line-height: 1.1; letter-spacing: -0.02em; font-weight: 600; }
+        #welcome h1 { font-size: 40px; line-height: 1.1; letter-spacing: -0.02em; font-weight: 600; }
         .welcome-suggestions {
           width: 100%;
-          max-width: 700px;
+          max-width: 780px;
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 10px;
         }
         .suggestion-btn {
-          border: 1px solid var(--border);
+          border: 1px solid #ececec;
           background: #ffffff;
-          color: var(--text-secondary);
+          color: #303030;
           border-radius: var(--radius-md);
-          padding: 14px 16px;
+          padding: 14px 16px 16px;
           text-align: left;
-          min-height: 84px;
-          font-size: 14px;
-          line-height: 1.35;
+          min-height: 90px;
+          font-size: 15px;
+          line-height: 1.48;
         }
         .suggestion-btn:hover { background: #f9fafb; color: var(--text-primary); border-color: #d1d5db; }
 
@@ -1680,10 +1822,7 @@ export default function SearchInterface() {
         .ai-table th { background: #f8fafc; color: #111827; font-weight: 600; }
         .search-indicator { color: var(--accent); font-size: 13px; margin-bottom: 8px; font-weight: 600; }
         .source-bar { margin-top: 10px; display: flex; gap: 6px; }
-        .source-pill { font-size: 11px; border-radius: 20px; padding: 2px 9px; border: 1px solid #d1fae5; background: #ecfdf5; color: #047857; }
-        .source-pill.web { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
-        .source-pill.enterprise { color: #0369a1; border-color: #bae6fd; background: #f0f9ff; }
-        .source-pill.auto { color: #374151; border-color: #e5e7eb; background: #f9fafb; }
+        .source-pill { font-size: 11px; border-radius: 20px; padding: 2px 9px; border: 1px solid #e5e7eb; color: #374151; background: #f9fafb; }
         .citations { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
         .cite-item {
           display: flex;
@@ -1706,22 +1845,28 @@ export default function SearchInterface() {
 
         #input-area {
           flex: 0 0 auto;
-          border-top: 1px solid var(--border);
-          padding: 22px 20px 28px;
+          border-top: 1px solid transparent;
+          padding: 40px 20px 0;
           background: #ffffff;
+        }
+        #page-bottom-anchor {
+          display: block;
+          width: 100%;
+          height: 16px;
+          pointer-events: none;
         }
         #input-wrapper {
           max-width: 840px;
           width: 100%;
           margin: 0 auto;
           background: var(--input-bg);
-          border: 1px solid #d1d5db;
-          border-radius: 20px;
-          padding: 14px 18px;
+          border: 1px solid #e7e7e7;
+          border-radius: 28px;
+          padding: 10px 12px;
           display: flex;
           flex-direction: column;
-          gap: 10px;
-          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+          gap: 8px;
+          box-shadow: 0 8px 28px rgba(16, 24, 40, 0.05);
         }
         .hidden-file-input { display: none; }
         .context-chips {
@@ -1763,27 +1908,47 @@ export default function SearchInterface() {
           outline: none;
           color: var(--text-primary);
           resize: none;
-          min-height: 42px;
+          min-height: 52px;
           max-height: 240px;
-          font-size: 16px;
+          font-size: 15px;
+          font-weight: 500;
           line-height: 1.5;
+          padding: 8px 10px 2px;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          overflow-x: hidden;
         }
-        #message-input::placeholder { color: #9ca3af; }
-        #input-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+        #message-input::placeholder { color: #9ca3af; font-size: 15px; font-weight: 600; }
+        #input-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 0; }
         .tools-menu-wrap { position: relative; }
         .tool-dropdown-btn {
-          border: 1px solid #d1d5db;
-          background: #ffffff;
+          border: 1px solid #ececec;
+          background: #f4f4f4;
           color: #0f172a;
           border-radius: 999px;
-          padding: 6px 12px;
-          font-size: 13px;
+          width: 34px;
+          height: 34px;
+          justify-content: center;
+          padding: 0;
           display: inline-flex;
           align-items: center;
-          gap: 8px;
+          gap: 0;
+          position: relative;
         }
-        .tool-dropdown-btn:hover { background: #f8fafc; border-color: #cbd5e1; }
-        .tool-caret { color: #64748b; font-size: 12px; }
+        .plus-glyph {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 24px;
+          line-height: 1;
+          font-weight: 400;
+          transform: translateY(-1px);
+          pointer-events: none;
+        }
+        .tool-dropdown-btn:hover { background: #efefef; border-color: #dbdbdb; }
         .tool-dropdown-menu {
           position: absolute;
           left: 0;
@@ -1816,10 +1981,33 @@ export default function SearchInterface() {
         }
         #input-right { display: flex; align-items: center; gap: 8px; }
         #char-count { font-size: 11px; color: var(--text-tertiary); }
-        #send-btn { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--send-bg); color: var(--send-color); }
+        #send-btn {
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          border: none;
+          background: var(--send-bg);
+          color: var(--send-color);
+          font-size: 16px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          position: relative;
+        }
+        .send-glyph {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 22px;
+          line-height: 1;
+          font-weight: 700;
+          transform: translateY(-1px);
+          pointer-events: none;
+        }
         #send-btn:hover { background: #000000; }
         #send-btn:disabled { background: #e5e7eb; color: #9ca3af; cursor: not-allowed; }
         #footer-note { max-width: 760px; margin: 10px auto 0; font-size: 12px; color: var(--text-tertiary); text-align: center; }
+        .subheader-copy { padding-top: 25px; }
 
         #toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: #111827; border: 1px solid #111827; border-radius: var(--radius-md); padding: 9px 18px; font-size: 13px; color: #ffffff; z-index: 200; opacity: 0; transition: opacity .25s; pointer-events: none; box-shadow: 0 10px 24px rgba(15,23,42,0.2); }
         #toast.show { opacity: 1; }
@@ -1840,8 +2028,6 @@ export default function SearchInterface() {
           #sidebar:not(.collapsed) { transform: translateX(0); }
           #topbar { padding: 10px 12px; }
           #chat-title { min-width: 0; width: 100%; order: 2; }
-          #mode-pills { width: 100%; order: 3; border-radius: 12px; }
-          .mode-pill { flex: 1; min-width: 72px; }
           .top-action-btn { order: 4; width: 100%; border-radius: 12px; }
           #input-area { padding: 14px 10px 16px; }
           #input-wrapper { padding: 10px 12px; border-radius: 14px; }

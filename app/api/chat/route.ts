@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
+import { AzureOpenAI } from "openai";
+import { toUserFacingChatError } from "./error-mapper";
 
-type SearchMode = "quick" | "agentic" | "deep";
-type ForceMode = "auto" | "web" | "enterprise";
+type SearchContextSize = "low" | "medium" | "high";
+type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+type TextVerbosity = "low" | "medium" | "high";
+
+type SearchMode = "quick" | "web_search" | "thinking" | "deep_research";
 
 type UploadContextFile = {
   name?: string;
   type?: string;
   size?: number;
-  contentKind?: "text" | "binary" | "metadata_only";
+  contentKind?: "text" | "binary";
   contentText?: string;
   contentBase64?: string;
   note?: string;
@@ -27,9 +31,8 @@ type HistoryTurnContext = {
 
 type ChatRequestBody = {
   query?: string;
-  forceMode?: ForceMode | null;
   message?: string;
-  searchMode?: SearchMode;
+  mode?: SearchMode;
   files?: UploadContextFile[];
   links?: string[];
   gitSnippets?: GitSnippetContext[];
@@ -52,18 +55,125 @@ type OutputItem = {
   content?: OutputContent[];
 };
 
+type ResponseInputText = {
+  type: "input_text";
+  text: string;
+};
+
+type ResponseInputFile = {
+  type: "input_file";
+  file_data: string;
+  filename?: string;
+  detail?: "low" | "high";
+};
+
+type ResponseInputMessage = {
+  id: string;
+  type: "message";
+  role: "user";
+  content: Array<ResponseInputText | ResponseInputFile>;
+};
+
 type ResponsesApi = {
   responses: {
     create: (params: {
       model: string | undefined;
-      tools: Array<{ type: "web_search"; search_context_size: "high" | "medium" }>;
-      input: string;
+      tools?: Array<{
+        type: "web_search";
+        search_context_size: SearchContextSize;
+      }>;
+      tool_choice?: "none" | "auto" | "required";
+      reasoning?: {
+        effort: ReasoningEffort;
+      };
+      text?: {
+        verbosity: TextVerbosity;
+      };
+      input: ResponseInputMessage[];
     }) => Promise<{
       output_text?: string;
       output?: OutputItem[];
     }>;
   };
 };
+
+type SearchPreset = {
+  tools?: Array<{
+    type: "web_search";
+    search_context_size: SearchContextSize;
+  }>;
+  tool_choice?: "none" | "auto" | "required";
+  reasoning?: {
+    effort: ReasoningEffort;
+  };
+  text?: {
+    verbosity: TextVerbosity;
+  };
+};
+
+const SEARCH_PRESETS: Record<SearchMode, SearchPreset> = {
+  quick: {
+    tools: [
+      {
+        type: "web_search",
+        search_context_size: "low",
+      },
+    ],
+    tool_choice: "auto",
+    reasoning: {
+      effort: "low",
+    },
+    text: {
+      verbosity: "low",
+    },
+  },
+  web_search: {
+    tools: [
+      {
+        type: "web_search",
+        search_context_size: "medium",
+      },
+    ],
+    tool_choice: "required",
+    reasoning: {
+      effort: "medium",
+    },
+    text: {
+      verbosity: "medium",
+    },
+  },
+  thinking: {
+    tool_choice: "none",
+    reasoning: {
+      effort: "high",
+    },
+    text: {
+      verbosity: "medium",
+    },
+  },
+  deep_research: {
+    tools: [
+      {
+        type: "web_search",
+        search_context_size: "high",
+      },
+    ],
+    tool_choice: "required",
+    reasoning: {
+      effort: "xhigh",
+    },
+    text: {
+      verbosity: "high",
+    },
+  },
+};
+
+function parseSearchMode(rawMode: unknown): SearchMode {
+  if (rawMode === "quick" || rawMode === "web_search" || rawMode === "thinking" || rawMode === "deep_research") {
+    return rawMode;
+  }
+  return "quick";
+}
 
 function normalizeAzureEndpoint(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
@@ -76,6 +186,7 @@ function getAzureConfig() {
   const endpoint = normalizeAzureEndpoint(
     process.env.AZURE_OPENAI_ENDPOINT ?? process.env.OPENAI_ENDPOINT,
   );
+  const apiVersion = process.env.AZURE_OPENAI_API_VERSION ?? process.env.OPENAI_API_VERSION;
   const deployment =
     process.env.AZURE_OPENAI_DEPLOYMENT ??
     process.env.AZURE_OPENAI_DEPLOYMENT_NAME ??
@@ -85,9 +196,10 @@ function getAzureConfig() {
   const missing: string[] = [];
   if (!apiKey) missing.push("AZURE_OPENAI_API_KEY");
   if (!endpoint) missing.push("AZURE_OPENAI_ENDPOINT");
+  if (!apiVersion) missing.push("AZURE_OPENAI_API_VERSION");
   if (!deployment) missing.push("AZURE_OPENAI_DEPLOYMENT");
 
-  return { apiKey, endpoint, deployment, missing };
+  return { apiKey, endpoint, apiVersion, deployment, missing };
 }
 
 export async function POST(req: NextRequest) {
@@ -101,13 +213,7 @@ export async function POST(req: NextRequest) {
     const links = Array.isArray(body.links) ? body.links : [];
     const gitSnippets = Array.isArray(body.gitSnippets) ? body.gitSnippets : [];
     const history = Array.isArray(body.history) ? body.history : [];
-    const forceMode = body.forceMode ?? null;
-    const searchMode =
-      forceMode === "web"
-        ? "deep"
-        : forceMode === "enterprise"
-          ? "agentic"
-          : (body.searchMode ?? "quick");
+    const searchMode = parseSearchMode(body.mode);
 
     if (!text && files.length === 0 && links.length === 0 && gitSnippets.length === 0) {
       console.log("[/api/chat] Validation failed: missing message");
@@ -137,6 +243,8 @@ export async function POST(req: NextRequest) {
 
     console.log("[/api/chat] Calling Azure OpenAI responses.create", {
       searchMode,
+      endpoint: config.endpoint,
+      apiVersion: config.apiVersion,
       deployment: config.deployment,
       fileCount: files.length,
       linkCount: links.length,
@@ -144,9 +252,10 @@ export async function POST(req: NextRequest) {
       historyTurnCount: history.length,
     });
 
-    const client = new OpenAI({
+    const client = new AzureOpenAI({
       apiKey: config.apiKey,
-      baseURL: `${config.endpoint}/openai/v1/`,
+      endpoint: config.endpoint,
+      apiVersion: config.apiVersion,
     });
 
     const contextSections: string[] = [];
@@ -155,7 +264,7 @@ export async function POST(req: NextRequest) {
       const trimmedHistory = history.slice(-8).map((turn, index) => {
         const userText = (turn.user || "").trim().slice(0, 1400);
         const assistantText = (turn.assistant || "").trim().slice(0, 1800);
-        const mode = (turn.mode || "auto").trim();
+        const mode = (turn.mode || "quick").trim();
         return [
           `Turn ${index + 1} (${mode})`,
           `User: ${userText || "(empty)"}`,
@@ -165,20 +274,28 @@ export async function POST(req: NextRequest) {
       contextSections.push(`Conversation history:\n${trimmedHistory.join("\n\n")}`);
     }
 
+    const inputFiles: ResponseInputFile[] = [];
+
     if (files.length > 0) {
       const fileEntries = files.map((file, index) => {
         const header = [
           `File ${index + 1}: ${file.name || "untitled"}`,
           `type=${file.type || "unknown"}`,
           `size=${typeof file.size === "number" ? file.size : 0} bytes`,
-          `kind=${file.contentKind || "metadata_only"}`,
+          `kind=${file.contentKind || "binary"}`,
         ].join(" | ");
 
         if (file.contentKind === "text" && file.contentText) {
           return `${header}\nText content:\n${file.contentText}`;
         }
         if (file.contentKind === "binary" && file.contentBase64) {
-          return `${header}\nBase64 content:\n${file.contentBase64}`;
+          inputFiles.push({
+            type: "input_file",
+            file_data: file.contentBase64,
+            filename: file.name || `document-${index + 1}`,
+            detail: "high",
+          });
+          return `${header}\nFile bytes included as structured file input for model parsing.`;
         }
         return `${header}\nNote: ${file.note || "No inline content provided."}`;
       });
@@ -198,22 +315,28 @@ export async function POST(req: NextRequest) {
       contextSections.push(`Git code context:\n${snippetEntries.join("\n\n")}`);
     }
 
-    const composedInput = [`User request:\n${text || "Analyze and summarize the provided context."}`, ...contextSections].join(
-      "\n\n",
-    );
+    const composedInput = [`User request:\n${text || "Analyze and summarize the provided context."}`, ...contextSections].join("\n\n");
+    const inputMessage: ResponseInputMessage = {
+      id: `msg-${Date.now()}`,
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: composedInput,
+        },
+        ...inputFiles,
+      ],
+    };
 
-    // Map modes: "quick" | "agentic" | "deep_research"
+    const preset = SEARCH_PRESETS[searchMode];
     const response = await (client as unknown as ResponsesApi).responses.create({
       model: config.deployment,
-      tools: [
-        {
-          type: "web_search",
-          // Optional: "quick" is fastest, "agentic" reasons over results,
-          // "deep_research" does extended multi-step investigation
-          search_context_size: searchMode === "deep" ? "high" : "medium",
-        },
-      ],
-      input: composedInput,
+      tools: preset.tools,
+      tool_choice: preset.tool_choice,
+      reasoning: preset.reasoning,
+      text: preset.text,
+      input: [inputMessage],
     });
 
     const citations =
@@ -233,11 +356,9 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.log("[/api/chat] Request failed", error);
+    const payload = toUserFacingChatError(error);
     return NextResponse.json(
-      {
-        error: "The request failed. Please try again in a moment.",
-        recovery: "Retry the request. If it keeps failing, verify your Azure OpenAI settings.",
-      },
+      payload,
       { status: 500 },
     );
   }
