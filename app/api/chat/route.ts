@@ -77,6 +77,7 @@ type ResponsesApi = {
   responses: {
     create: (params: {
       model: string | undefined;
+      instructions?: string;
       tools?: Array<{
         type: "web_search";
         search_context_size: SearchContextSize;
@@ -168,6 +169,30 @@ const SEARCH_PRESETS: Record<SearchMode, SearchPreset> = {
     },
   },
 };
+
+const RESPONSE_FORMAT_INSTRUCTIONS = [
+  "Use this exact response structure unless the user explicitly asks for a different format:",
+  "",
+  "## Direct answer",
+  "- 1-3 sentences that answer the user directly.",
+  "",
+  "## Key points",
+  "- Provide 3-6 short bullet points with the most important facts.",
+  "",
+  "## Details / rationale",
+  "- Add only when needed for clarity.",
+  "",
+  "## Actionable next steps",
+  "- Provide a numbered list of concrete next steps when helpful.",
+  "",
+  "## Assumptions / caveats",
+  "- Include only when assumptions, uncertainty, or constraints exist.",
+  "",
+  "Writing requirements:",
+  "- Use plain language and avoid fluff.",
+  "- Be explicit about uncertainty.",
+  "- Keep headings exactly as written above.",
+].join("\n");
 
 function parseSearchMode(rawMode: unknown): SearchMode {
   if (rawMode === "quick" || rawMode === "web_search" || rawMode === "thinking" || rawMode === "deep_research") {
@@ -332,6 +357,7 @@ export async function POST(req: NextRequest) {
     const preset = SEARCH_PRESETS[searchMode];
     const baseRequest: ChatResponsesRequest = {
       model: config.deployment,
+      instructions: RESPONSE_FORMAT_INSTRUCTIONS,
       tools: preset.tools,
       tool_choice: preset.tool_choice,
       reasoning: preset.reasoning,
@@ -366,6 +392,7 @@ export async function POST(req: NextRequest) {
 
       const fallbackRequest: ChatResponsesRequest = {
         model: config.deployment,
+        instructions: RESPONSE_FORMAT_INSTRUCTIONS,
         input: [inputMessage],
       };
       if (preset.tools && searchMode !== "thinking") {

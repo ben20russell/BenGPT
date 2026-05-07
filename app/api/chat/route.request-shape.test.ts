@@ -49,4 +49,34 @@ describe("POST /api/chat request shape", () => {
     expect(firstCall.input?.[0]).toBeDefined();
     expect(firstCall.input?.[0]).not.toHaveProperty("id");
   });
+
+  it("sends a formatting instruction that enforces a Claude-like response structure", async () => {
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "ok",
+      output: [],
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query: "Explain this" }),
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+
+    const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
+      instructions?: string;
+    };
+
+    expect(firstCall.instructions).toBeTruthy();
+    expect(firstCall.instructions).toContain("Direct answer");
+    expect(firstCall.instructions).toContain("Key points");
+    expect(firstCall.instructions).toContain("Details / rationale");
+    expect(firstCall.instructions).toContain("Actionable next steps");
+    expect(firstCall.instructions).toContain("Assumptions / caveats");
+  });
 });
