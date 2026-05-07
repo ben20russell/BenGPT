@@ -317,6 +317,40 @@ describe('SearchInterface', () => {
     expect(await screen.findByText(/console\.log\(answer\);/)).toBeInTheDocument();
   });
 
+  it('renders loose ordered list items as a single sequential numbered list', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        answer: [
+          'Watch for these next developments:',
+          '',
+          '1. First checkpoint',
+          '',
+          'Some supporting context for the first checkpoint.',
+          '',
+          '1. Second checkpoint',
+          '',
+          'Some supporting context for the second checkpoint.',
+        ].join('\n'),
+        citations: [],
+      }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { container } = render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Show list numbering');
+    await user.click(screen.getByTestId('send-btn'));
+
+    expect(await screen.findByText(/First checkpoint/)).toBeInTheDocument();
+    expect(await screen.findByText(/Second checkpoint/)).toBeInTheDocument();
+    expect(screen.queryByText('1. First checkpoint')).not.toBeInTheDocument();
+    expect(screen.queryByText('1. Second checkpoint')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('.ai-list-ol li').length).toBeGreaterThanOrEqual(2);
+  });
+
   it('hides PDF export button before any results appear', () => {
     render(<SearchInterface />);
     expect(screen.queryByTestId('pdf-export-btn')).not.toBeInTheDocument();

@@ -236,8 +236,43 @@ function parseMarkdownBlocks(text: string): MarkdownBlock[] {
       while (i < lines.length) {
         const itemMatch = (lines[i] ?? '').trim().match(/^\d+\.\s+(.+)$/);
         if (!itemMatch) break;
-        items.push(itemMatch[1]);
+        const itemLines = [itemMatch[1]];
         i += 1;
+
+        while (i < lines.length) {
+          const candidateRaw = lines[i] ?? '';
+          const candidate = candidateRaw.trim();
+
+          if (!candidate) {
+            let lookahead = i + 1;
+            while (lookahead < lines.length && !((lines[lookahead] ?? '').trim())) {
+              lookahead += 1;
+            }
+            const nextCandidate = (lines[lookahead] ?? '').trim();
+            if (nextCandidate.match(/^\d+\.\s+/)) {
+              i = lookahead;
+              break;
+            }
+            i += 1;
+            continue;
+          }
+
+          if (
+            candidate.match(/^\d+\.\s+/) ||
+            candidate.match(/^[-*+]\s+/) ||
+            candidate.match(/^```/) ||
+            candidate.match(/^(#{1,6})\s+/) ||
+            candidate.startsWith('>') ||
+            candidate.match(/^([-*_])(?:\s*\1){2,}\s*$/)
+          ) {
+            break;
+          }
+
+          itemLines.push(candidate);
+          i += 1;
+        }
+
+        items.push(itemLines.join(' '));
       }
       blocks.push({ type: 'ol', items });
       continue;

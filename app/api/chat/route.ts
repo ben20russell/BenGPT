@@ -68,7 +68,6 @@ type ResponseInputFile = {
 };
 
 type ResponseInputMessage = {
-  id: string;
   type: "message";
   role: "user";
   content: Array<ResponseInputText | ResponseInputFile>;
@@ -96,6 +95,8 @@ type ResponsesApi = {
     }>;
   };
 };
+
+type ChatResponsesRequest = Parameters<ResponsesApi["responses"]["create"]>[0];
 
 type SearchPreset = {
   tools?: Array<{
@@ -317,7 +318,6 @@ export async function POST(req: NextRequest) {
 
     const composedInput = [`User request:\n${text || "Analyze and summarize the provided context."}`, ...contextSections].join("\n\n");
     const inputMessage: ResponseInputMessage = {
-      id: `msg-${Date.now()}`,
       type: "message",
       role: "user",
       content: [
@@ -330,14 +330,50 @@ export async function POST(req: NextRequest) {
     };
 
     const preset = SEARCH_PRESETS[searchMode];
-    const response = await (client as unknown as ResponsesApi).responses.create({
+    const baseRequest: ChatResponsesRequest = {
       model: config.deployment,
       tools: preset.tools,
       tool_choice: preset.tool_choice,
       reasoning: preset.reasoning,
       text: preset.text,
       input: [inputMessage],
-    });
+    };
+
+    let response;
+    try {
+      response = await (client as unknown as ResponsesApi).responses.create(baseRequest);
+    } catch (error) {
+      const maybe = error as { status?: number; message?: string; error?: { message?: string } };
+      const merged = `${(maybe?.message || "").toLowerCase()} ${(maybe?.error?.message || "").toLowerCase()}`;
+      const shouldRetryMinimal =
+        maybe?.status === 400 &&
+        (merged.includes("reasoning") ||
+          merged.includes("tool_choice") ||
+          merged.includes("text") ||
+          merged.includes("verbosity") ||
+          merged.includes("unsupported") ||
+          merged.includes("invalid"));
+
+      if (!shouldRetryMinimal) {
+        throw error;
+      }
+
+      console.log("[/api/chat] Retrying with minimal request shape after parameter rejection", {
+        searchMode,
+        status: maybe?.status,
+        message: maybe?.message,
+      });
+
+      const fallbackRequest: ChatResponsesRequest = {
+        model: config.deployment,
+        input: [inputMessage],
+      };
+      if (preset.tools && searchMode !== "thinking") {
+        fallbackRequest.tools = preset.tools;
+      }
+
+      response = await (client as unknown as ResponsesApi).responses.create(fallbackRequest);
+    }
 
     const citations =
       response.output
