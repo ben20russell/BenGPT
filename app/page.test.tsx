@@ -26,6 +26,30 @@ describe('SearchInterface', () => {
     expect(homeLink).toHaveAttribute('href', '/');
   });
 
+  it('uses the same new chat behavior for the header brand link and new chat button', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ answer: 'Behavior check', citations: [] }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Create a conversation');
+    await user.click(screen.getByTestId('send-btn'));
+    expect(await screen.findByText('Behavior check')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('brand-home-link'));
+    expect(screen.getByTestId('chat-title')).toHaveTextContent('New chat');
+
+    await user.click(screen.getByTestId(/conversation-open-/));
+    expect(screen.getByTestId('chat-title')).not.toHaveTextContent('New chat');
+
+    await user.click(screen.getByTestId('new-chat-btn'));
+    expect(screen.getByTestId('chat-title')).toHaveTextContent('New chat');
+  });
+
   it('enables send after entering a message', async () => {
     const user = userEvent.setup();
     render(<SearchInterface />);
