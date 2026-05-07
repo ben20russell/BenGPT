@@ -1515,6 +1515,7 @@ export default function SearchInterface() {
         #sidebar-bottom { padding: 12px; border-top: 1px solid var(--border); position: relative; }
         #main {
           flex: 1;
+          min-width: 0;
           display: flex;
           flex-direction: column;
           overflow: hidden;
@@ -1524,14 +1525,15 @@ export default function SearchInterface() {
         #topbar {
           display: flex;
           align-items: center;
+          flex-wrap: wrap;
           gap: 8px;
           padding: 12px 16px;
           border-bottom: 1px solid var(--border);
           background: #ffffff;
         }
         #sidebar-toggle { background: transparent; border: none; color: var(--text-secondary); }
-        #chat-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
-        #mode-pills { display: flex; gap: 3px; padding: 3px; border-radius: 20px; border: 1px solid var(--border); background: #f7f7f7; }
+        #chat-title { flex: 1; min-width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+        #mode-pills { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; border-radius: 20px; border: 1px solid var(--border); background: #f7f7f7; }
         .mode-pill { border: none; background: transparent; color: var(--text-secondary); padding: 4px 12px; border-radius: 20px; }
         .mode-pill.active { color: #ffffff; background: var(--accent); }
         .top-action-btn {
@@ -1697,6 +1699,7 @@ export default function SearchInterface() {
         }
         #input-wrapper {
           max-width: 840px;
+          width: 100%;
           margin: 0 auto;
           background: var(--input-bg);
           border: 1px solid #d1d5db;
@@ -1822,6 +1825,16 @@ export default function SearchInterface() {
         @media (max-width: 640px) {
           #sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 60; transform: translateX(-100%); }
           #sidebar:not(.collapsed) { transform: translateX(0); }
+          #topbar { padding: 10px 12px; }
+          #chat-title { min-width: 0; width: 100%; order: 2; }
+          #mode-pills { width: 100%; order: 3; border-radius: 12px; }
+          .mode-pill { flex: 1; min-width: 72px; }
+          .top-action-btn { order: 4; width: 100%; border-radius: 12px; }
+          #input-area { padding: 14px 10px 16px; }
+          #input-wrapper { padding: 10px 12px; border-radius: 14px; }
+          .tool-dropdown-btn { max-width: 100%; }
+          .tool-dropdown-menu { left: 0; right: auto; min-width: min(220px, calc(100vw - 30px)); }
+          #input-footer { gap: 8px; }
           #welcome h1 { font-size: 30px; text-align: center; }
           .welcome-suggestions { grid-template-columns: 1fr; }
         }
