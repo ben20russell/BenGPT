@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
@@ -42,20 +43,9 @@ type RecentSearchesRow = {
   updated_at: string;
 };
 
-type RecentSearchesSupabaseClient = {
-  from: (table: string) => {
-    select: (query: string) => {
-      eq: (column: string, value: string) => {
-        maybeSingle: <T = unknown>() => Promise<{ data: T | null; error: unknown }>;
-      };
-    };
-    upsert: (payload: unknown, options: { onConflict: string }) => Promise<{ error: unknown }>;
-  };
-};
+let supabaseClient: SupabaseClient | null | undefined;
 
-let supabaseClient: RecentSearchesSupabaseClient | null | undefined;
-
-async function getSupabaseClient(): Promise<RecentSearchesSupabaseClient | null> {
+function getSupabaseClient(): SupabaseClient | null {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const supabaseKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
@@ -71,31 +61,20 @@ async function getSupabaseClient(): Promise<RecentSearchesSupabaseClient | null>
 
   if (typeof supabaseClient !== "undefined" && supabaseClient !== null) return supabaseClient;
 
-  try {
-    const supabaseModule = (await import("@supabase/supabase-js")) as {
-      createClient: (url: string, key: string, options: { auth: { persistSession: boolean; autoRefreshToken: boolean } }) => RecentSearchesSupabaseClient;
-    };
-    supabaseClient = supabaseModule.createClient(supabaseUrl, supabaseKey, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-      },
-    });
-    console.log("[/api/recent-searches] Supabase client initialized");
-    return supabaseClient;
-  } catch (error) {
-    console.log("[/api/recent-searches] Supabase package unavailable; using local file storage fallback", {
-      error,
-    });
-    supabaseClient = null;
-    return supabaseClient;
-  }
+  supabaseClient = createClient(supabaseUrl, supabaseKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+  console.log("[/api/recent-searches] Supabase client initialized");
+  return supabaseClient;
 }
 
 function getStorePath() {
   const explicit = process.env.RECENT_SEARCHES_STORE_PATH?.trim();
   if (explicit) return explicit;
-  return path.join(process.cwd(), ".data", "recent-searches.json");
+  return path.join(/* turbopackIgnore: true */ process.cwd(), ".data", "recent-searches.json");
 }
 
 async function readStore(): Promise<StoredRecentSearchesRecord> {
@@ -151,7 +130,7 @@ async function readFromSupabase(clientKey: string): Promise<{
   activeConversationId: string | null;
   updatedAt?: string;
 } | null> {
-  const supabase = await getSupabaseClient();
+  const supabase = getSupabaseClient();
   if (!supabase) return null;
 
   const { data, error } = await supabase
@@ -181,7 +160,7 @@ async function writeToSupabase(input: {
   conversations: StoredConversation[];
   activeConversationId: string | null;
 }) {
-  const supabase = await getSupabaseClient();
+  const supabase = getSupabaseClient();
   if (!supabase) return false;
 
   const payload: RecentSearchesRow = {
@@ -242,7 +221,7 @@ function sanitizeConversations(raw: unknown): StoredConversation[] {
 export async function GET(req: NextRequest) {
   try {
     const key = buildClientKey(req);
-    const supabase = await getSupabaseClient();
+    const supabase = getSupabaseClient();
     console.log("[/api/recent-searches] GET request", { key });
     if (supabase) {
       const existing = await readFromSupabase(key);
