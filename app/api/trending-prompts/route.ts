@@ -13,6 +13,12 @@ const FEED_URLS = [
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 let cachedResult: CachedPromptResult | null = null;
+const POP_CULTURE_FALLBACK_SUGGESTIONS = [
+  "What are the biggest pop culture moments trending this week?",
+  "Break down the most talked-about celebrity stories right now.",
+  "What should I watch next based on today’s streaming buzz?",
+  "Which new music releases are dominating charts and social media?",
+];
 
 const POLITICS_PATTERNS: RegExp[] = [
   /\bpolitic(s|al)?\b/i,
@@ -69,6 +75,12 @@ function isPolitical(text: string): boolean {
   return POLITICS_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function isLikelyPopCulture(text: string): boolean {
+  return /\b(movie|film|tv|series|show|streaming|celebrity|music|album|song|box office|festival|award|entertainment|pop culture)\b/i.test(
+    text,
+  );
+}
+
 function hourSeed(now: Date): number {
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth() + 1;
@@ -87,17 +99,18 @@ function seededRandom(seedStart: number) {
 
 function buildPromptsFromHeadlines(headlines: string[], now: Date): string[] {
   const templates = [
-    (headline: string) => `What are the key implications of: "${headline}"?`,
-    (headline: string) => `Give me a concise briefing on "${headline}" with likely second-order effects.`,
-    (headline: string) => `How could "${headline}" impact businesses and consumers over the next month?`,
-    (headline: string) => `Summarize "${headline}" and compare how major sources are framing it.`,
-    (headline: string) => `Turn "${headline}" into a research checklist with sources to verify.`,
-    (headline: string) => `What should I watch next after "${headline}" develops?`,
+    (headline: string) => `Give me a quick pop culture breakdown of: "${headline}".`,
+    (headline: string) => `Why is "${headline}" trending and what should fans watch next?`,
+    (headline: string) => `Summarize "${headline}" and compare how entertainment outlets are framing it.`,
+    (headline: string) => `Turn "${headline}" into a watch/listen/read checklist for this week.`,
+    (headline: string) => `What are the biggest fan reactions and social trends around "${headline}"?`,
+    (headline: string) => `How does "${headline}" connect to broader pop culture trends this month?`,
   ];
 
   const random = seededRandom(hourSeed(now));
   const deduped = Array.from(new Set(headlines))
     .filter((headline) => !isPolitical(headline))
+    .filter((headline) => isLikelyPopCulture(headline))
     .slice(0, 50);
   const prompts: string[] = [];
 
@@ -149,12 +162,7 @@ export async function GET() {
       suggestions:
         suggestions.length > 0
           ? suggestions
-          : [
-              "What are today’s most important global headlines and why do they matter?",
-              "Which current technology stories are worth tracking this week?",
-              "Summarize the top business and economic news shaping markets right now.",
-              "What major stories are emerging in AI, climate, and science today?",
-            ],
+          : POP_CULTURE_FALLBACK_SUGGESTIONS,
       generatedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + ONE_HOUR_MS).toISOString(),
     };
@@ -166,10 +174,7 @@ export async function GET() {
     return NextResponse.json(
       {
         suggestions: [
-          "What are today’s most important global headlines and why do they matter?",
-          "Which current technology stories are worth tracking this week?",
-          "Summarize the top business and economic news shaping markets right now.",
-          "What major stories are emerging in AI, climate, and science today?",
+          ...POP_CULTURE_FALLBACK_SUGGESTIONS,
         ],
         generatedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + ONE_HOUR_MS).toISOString(),

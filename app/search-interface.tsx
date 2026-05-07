@@ -61,10 +61,10 @@ type BoundaryState = {
 };
 
 const FALLBACK_WELCOME_SUGGESTIONS = [
-  'Search the web for the latest AI news this week',
-  'What are the current trends in B2B SaaS marketing?',
-  'Give me a deep research report on agentic AI for enterprise',
-  'Compare voice AI platforms: RingCentral vs Dialpad vs Cisco',
+  'What are the biggest pop culture moments trending this week?',
+  'Break down the most talked-about celebrity stories right now.',
+  'What should I watch next based on today’s streaming buzz?',
+  'Which new music releases are dominating charts and social media?',
 ];
 
 type MarkdownBlock =
