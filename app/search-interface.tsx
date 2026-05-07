@@ -1692,7 +1692,7 @@ export default function SearchInterface() {
 
         #input-area {
           border-top: 1px solid var(--border);
-          padding: 14px 16px 20px;
+          padding: 22px 20px 28px;
           background: #ffffff;
         }
         #input-wrapper {
@@ -1701,10 +1701,10 @@ export default function SearchInterface() {
           background: var(--input-bg);
           border: 1px solid #d1d5db;
           border-radius: 20px;
-          padding: 10px 14px;
+          padding: 14px 18px;
           display: flex;
           flex-direction: column;
-          gap: 8px;
+          gap: 10px;
           box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
         }
         .hidden-file-input { display: none; }
@@ -1747,8 +1747,8 @@ export default function SearchInterface() {
           outline: none;
           color: var(--text-primary);
           resize: none;
-          min-height: 28px;
-          max-height: 200px;
+          min-height: 42px;
+          max-height: 240px;
           font-size: 16px;
           line-height: 1.5;
         }

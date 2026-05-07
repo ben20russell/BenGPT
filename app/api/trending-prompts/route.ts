@@ -14,6 +14,25 @@ const FEED_URLS = [
 const ONE_HOUR_MS = 60 * 60 * 1000;
 let cachedResult: CachedPromptResult | null = null;
 
+const POLITICS_PATTERNS: RegExp[] = [
+  /\bpolitic(s|al)?\b/i,
+  /\belection(s)?\b/i,
+  /\bcampaign(s)?\b/i,
+  /\bcongress\b/i,
+  /\bsenate\b/i,
+  /\bparliament\b/i,
+  /\bwhite house\b/i,
+  /\bpresident(ial)?\b/i,
+  /\bprime minister\b/i,
+  /\bgop\b/i,
+  /\bdemocrat(ic|s)?\b/i,
+  /\brepublican(s)?\b/i,
+  /\bminister(s)?\b/i,
+  /\bgovernment\b/i,
+  /\bgeopolitic(s|al)?\b/i,
+  /\bpolicy\b/i,
+];
+
 function decodeEntities(text: string): string {
   return text
     .replaceAll("&amp;", "&")
@@ -46,6 +65,10 @@ function parseRssTitles(xml: string): string[] {
   return titles;
 }
 
+function isPolitical(text: string): boolean {
+  return POLITICS_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function hourSeed(now: Date): number {
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth() + 1;
@@ -73,7 +96,9 @@ function buildPromptsFromHeadlines(headlines: string[], now: Date): string[] {
   ];
 
   const random = seededRandom(hourSeed(now));
-  const deduped = Array.from(new Set(headlines)).slice(0, 50);
+  const deduped = Array.from(new Set(headlines))
+    .filter((headline) => !isPolitical(headline))
+    .slice(0, 50);
   const prompts: string[] = [];
 
   while (prompts.length < 6 && deduped.length > 0) {
@@ -81,7 +106,9 @@ function buildPromptsFromHeadlines(headlines: string[], now: Date): string[] {
     const templateIndex = Math.floor(random() * templates.length);
     const headline = deduped.splice(headlineIndex, 1)[0];
     if (!headline) continue;
-    prompts.push(templates[templateIndex](headline));
+    const prompt = templates[templateIndex](headline);
+    if (isPolitical(prompt)) continue;
+    prompts.push(prompt);
   }
 
   return prompts;
@@ -125,8 +152,8 @@ export async function GET() {
           : [
               "What are today’s most important global headlines and why do they matter?",
               "Which current technology stories are worth tracking this week?",
-              "Summarize the top business and policy news shaping markets right now.",
-              "What major stories are emerging in AI, climate, and geopolitics today?",
+              "Summarize the top business and economic news shaping markets right now.",
+              "What major stories are emerging in AI, climate, and science today?",
             ],
       generatedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + ONE_HOUR_MS).toISOString(),
@@ -141,8 +168,8 @@ export async function GET() {
         suggestions: [
           "What are today’s most important global headlines and why do they matter?",
           "Which current technology stories are worth tracking this week?",
-          "Summarize the top business and policy news shaping markets right now.",
-          "What major stories are emerging in AI, climate, and geopolitics today?",
+          "Summarize the top business and economic news shaping markets right now.",
+          "What major stories are emerging in AI, climate, and science today?",
         ],
         generatedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + ONE_HOUR_MS).toISOString(),
