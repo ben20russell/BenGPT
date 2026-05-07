@@ -66,6 +66,8 @@ type RecentSearchesLocalSnapshot = {
   activeConversationId: string | null;
 };
 
+const RECENTS_LAST_SNAPSHOT_KEY = 'beacon-search-recents:last';
+
 type BoundaryState = {
   hasError: boolean;
   message: string;
@@ -623,6 +625,20 @@ export default function SearchInterface() {
     return `beacon-search-recents:${currentDeviceId}`;
   }
 
+  function parseLocalRecentsSnapshot(raw: string | null): RecentSearchesLocalSnapshot | null {
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as Partial<RecentSearchesLocalSnapshot>;
+      const conversations = Array.isArray(parsed.conversations) ? parsed.conversations : [];
+      const activeConversationId =
+        typeof parsed.activeConversationId === 'string' ? parsed.activeConversationId : null;
+      return { conversations, activeConversationId };
+    } catch (error) {
+      console.log('[UI] Failed to parse local recents snapshot', { error });
+      return null;
+    }
+  }
+
   useEffect(() => {
     console.log('[UI] Component mounted');
     if (process.env.NODE_ENV === 'test') return;
@@ -661,18 +677,19 @@ export default function SearchInterface() {
     async function loadRecents() {
       try {
         const localStorageKey = getRecentsStorageKey(deviceId);
-        const localRaw = window.localStorage.getItem(localStorageKey);
-        if (localRaw) {
-          const localParsed = JSON.parse(localRaw) as Partial<RecentSearchesLocalSnapshot>;
-          const localConversations = Array.isArray(localParsed.conversations) ? localParsed.conversations : [];
-          const localActive =
-            typeof localParsed.activeConversationId === 'string' ? localParsed.activeConversationId : null;
+        const localSnapshot =
+          parseLocalRecentsSnapshot(window.localStorage.getItem(localStorageKey)) ??
+          parseLocalRecentsSnapshot(window.localStorage.getItem(RECENTS_LAST_SNAPSHOT_KEY));
+        if (localSnapshot) {
+          const localConversations = localSnapshot.conversations;
+          const localActive = localSnapshot.activeConversationId;
           const localHasActive = localActive
             ? localConversations.some((conversation) => conversation.id === localActive)
             : false;
           setConversations(localConversations);
           setActiveConversationId(localHasActive ? localActive : null);
           console.log('[UI] Loaded recent searches from local backup', {
+            key: localStorageKey,
             count: localConversations.length,
             activeConversationId: localHasActive ? localActive : null,
           });
@@ -735,8 +752,10 @@ export default function SearchInterface() {
         activeConversationId,
       };
       window.localStorage.setItem(localStorageKey, JSON.stringify(payload));
+      window.localStorage.setItem(RECENTS_LAST_SNAPSHOT_KEY, JSON.stringify(payload));
       console.log('[UI] Saved recent searches to local backup', {
         key: localStorageKey,
+        fallbackKey: RECENTS_LAST_SNAPSHOT_KEY,
         count: conversations.length,
         activeConversationId,
       });
