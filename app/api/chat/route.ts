@@ -99,7 +99,7 @@ export async function POST(req: NextRequest) {
       });
       return NextResponse.json(
         {
-          error: "Server configuration is incomplete.",
+          error: `Server configuration is incomplete. Missing: ${config.missing.join(", ")}`,
           recovery: `Set ${config.missing.join(", ")} in Vercel project settings for this deployment.`,
         },
         { status: 500 },

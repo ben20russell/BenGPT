@@ -45,4 +45,84 @@ describe('SearchInterface', () => {
       forceMode: 'web',
     });
   });
+
+  it('renders assistant output in a structured readable layout', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        answer: [
+          'Summary:',
+          'This answer is organized for readability.',
+          '',
+          '- Key point one',
+          '- Key point two',
+          '',
+          'Next steps:',
+          '1. Do this first',
+          '2. Do this second',
+        ].join('\n'),
+        citations: [],
+      }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Format this');
+    await user.click(screen.getByTestId('send-btn'));
+
+    expect(await screen.findByText('Summary')).toBeInTheDocument();
+    expect(await screen.findByText('Key point one')).toBeInTheDocument();
+    expect(await screen.findByText('Do this second')).toBeInTheDocument();
+    expect(screen.getByTestId('assistant-rich-output')).toBeInTheDocument();
+  });
+
+  it('shows a PDF export button', () => {
+    render(<SearchInterface />);
+    expect(screen.getByTestId('pdf-export-btn')).toBeInTheDocument();
+  });
+
+  it('exports chat content through a print window when conversation exists', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ answer: 'Exportable answer', citations: [] }),
+    });
+
+    const writeMock = vi.fn();
+    const closeMock = vi.fn();
+    const focusMock = vi.fn();
+    const printMock = vi.fn();
+    const openMock = vi.fn().mockReturnValue({
+      document: {
+        write: writeMock,
+        close: closeMock,
+      },
+      focus: focusMock,
+      print: printMock,
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('open', openMock);
+
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Create exportable response');
+    await user.click(screen.getByTestId('send-btn'));
+    expect(await screen.findByText('Exportable answer')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('pdf-export-btn'));
+
+    expect(openMock).toHaveBeenCalledTimes(1);
+    expect(writeMock).toHaveBeenCalledTimes(1);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+    expect(focusMock).toHaveBeenCalledTimes(1);
+    expect(printMock).toHaveBeenCalledTimes(1);
+
+    const html = String(writeMock.mock.calls[0]?.[0] ?? '');
+    expect(html).toContain('Create exportable response');
+    expect(html).toContain('Exportable answer');
+  });
 });

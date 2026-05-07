@@ -30,6 +30,123 @@ type BoundaryState = {
   message: string;
 };
 
+type StructuredBlock =
+  | { type: 'heading'; text: string }
+  | { type: 'paragraph'; text: string }
+  | { type: 'ul'; items: string[] }
+  | { type: 'ol'; items: string[] };
+
+function escapeHtml(text: string) {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function buildPrintableConversationHtml(
+  title: string,
+  turns: Turn[],
+  exportedAt: string,
+  getModeLabel: (mode: SearchMode) => string,
+) {
+  const content = turns
+    .map((turn, index) => {
+      const safeUser = escapeHtml(turn.user);
+      const safeAssistant = escapeHtml(turn.assistant || turn.error || '');
+      const safeMode = escapeHtml(getModeLabel(turn.mode));
+      const citationsHtml =
+        turn.citations.length > 0
+          ? `<div class="citations"><strong>Sources</strong><ul>${turn.citations
+              .slice(0, 10)
+              .map((citation) => {
+                const link = citation.url || '';
+                const titleText = citation.title || citation.url || 'Citation';
+                return `<li>${link ? `<a href="${escapeHtml(link)}">${escapeHtml(titleText)}</a>` : escapeHtml(titleText)}</li>`;
+              })
+              .join('')}</ul></div>`
+          : '';
+
+      return `
+        <section class="turn">
+          <div class="turn-head">Turn ${index + 1} · ${safeMode}</div>
+          <div class="bubble user">
+            <div class="label">You</div>
+            <pre>${safeUser}</pre>
+          </div>
+          <div class="bubble assistant">
+            <div class="label">Assistant</div>
+            <pre>${safeAssistant}</pre>
+          </div>
+          ${citationsHtml}
+        </section>
+      `;
+    })
+    .join('');
+
+  return `
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <title>${escapeHtml(title)} - Export</title>
+      <style>
+        @page { size: auto; margin: 18mm; }
+        :root { color-scheme: light; }
+        body {
+          margin: 0;
+          font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+          color: #111827;
+          background: #ffffff;
+          line-height: 1.5;
+        }
+        .doc { max-width: 840px; margin: 0 auto; }
+        .header { border-bottom: 1px solid #e5e7eb; padding-bottom: 12px; margin-bottom: 20px; }
+        .header h1 { font-size: 22px; margin: 0 0 6px; }
+        .meta { font-size: 12px; color: #4b5563; }
+        .turn { margin-bottom: 18px; page-break-inside: avoid; }
+        .turn-head { font-size: 12px; color: #4b5563; margin-bottom: 8px; }
+        .bubble {
+          border: 1px solid #e5e7eb;
+          border-radius: 12px;
+          padding: 12px;
+          margin-bottom: 10px;
+        }
+        .bubble.user { background: #f9fafb; }
+        .bubble.assistant { background: #ffffff; }
+        .label { font-weight: 600; font-size: 13px; margin-bottom: 8px; color: #111827; }
+        pre {
+          margin: 0;
+          font-size: 14px;
+          white-space: pre-wrap;
+          word-wrap: break-word;
+          font-family: inherit;
+        }
+        .citations {
+          border-left: 3px solid #10a37f;
+          background: #f7fdfb;
+          padding: 8px 10px;
+          font-size: 12px;
+          color: #374151;
+        }
+        .citations ul { margin: 6px 0 0 18px; padding: 0; }
+        .citations a { color: #0f766e; text-decoration: none; }
+      </style>
+    </head>
+    <body>
+      <main class="doc">
+        <header class="header">
+          <h1>${escapeHtml(title)}</h1>
+          <div class="meta">Exported ${escapeHtml(exportedAt)} · ${turns.length} turn(s)</div>
+        </header>
+        ${content}
+      </main>
+    </body>
+    </html>
+  `;
+}
+
 const MODELS: Record<ModelId, { label: string; supportsSearch: boolean }> = {
   'gpt-5': { label: 'GPT-5', supportsSearch: true },
   'gpt-4.1': { label: 'GPT-4.1', supportsSearch: true },
@@ -158,6 +275,120 @@ export default function SearchInterface() {
     setCurrentMode(next);
   }
 
+  function parseStructuredBlocks(text: string): StructuredBlock[] {
+    const lines = text.split('\n');
+    const blocks: StructuredBlock[] = [];
+    let paragraphBuffer: string[] = [];
+    let ulBuffer: string[] = [];
+    let olBuffer: string[] = [];
+
+    function flushParagraph() {
+      if (paragraphBuffer.length === 0) return;
+      blocks.push({ type: 'paragraph', text: paragraphBuffer.join(' ').trim() });
+      paragraphBuffer = [];
+    }
+
+    function flushUl() {
+      if (ulBuffer.length === 0) return;
+      blocks.push({ type: 'ul', items: [...ulBuffer] });
+      ulBuffer = [];
+    }
+
+    function flushOl() {
+      if (olBuffer.length === 0) return;
+      blocks.push({ type: 'ol', items: [...olBuffer] });
+      olBuffer = [];
+    }
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        flushParagraph();
+        flushUl();
+        flushOl();
+        continue;
+      }
+
+      const bulletMatch = line.match(/^[-*]\s+(.+)$/);
+      if (bulletMatch) {
+        flushParagraph();
+        flushOl();
+        ulBuffer.push(bulletMatch[1]);
+        continue;
+      }
+
+      const numberedMatch = line.match(/^\d+\.\s+(.+)$/);
+      if (numberedMatch) {
+        flushParagraph();
+        flushUl();
+        olBuffer.push(numberedMatch[1]);
+        continue;
+      }
+
+      if (line.endsWith(':') && line.length <= 90) {
+        flushParagraph();
+        flushUl();
+        flushOl();
+        blocks.push({ type: 'heading', text: line.slice(0, -1) });
+        continue;
+      }
+
+      flushUl();
+      flushOl();
+      paragraphBuffer.push(line);
+    }
+
+    flushParagraph();
+    flushUl();
+    flushOl();
+    return blocks;
+  }
+
+  function renderStructuredAssistantText(text: string) {
+    if (!text) return null;
+    const blocks = parseStructuredBlocks(text);
+
+    return (
+      <div className="ai-rich" data-testid="assistant-rich-output">
+        {blocks.map((block, index) => {
+          if (block.type === 'heading') {
+            return (
+              <h3 className="ai-section-title" key={`h-${index}`}>
+                {block.text}
+              </h3>
+            );
+          }
+
+          if (block.type === 'ul') {
+            return (
+              <ul className="ai-list ai-list-ul" key={`ul-${index}`}>
+                {block.items.map((item, itemIndex) => (
+                  <li key={`ul-${index}-${itemIndex}`}>{item}</li>
+                ))}
+              </ul>
+            );
+          }
+
+          if (block.type === 'ol') {
+            return (
+              <ol className="ai-list ai-list-ol" key={`ol-${index}`}>
+                {block.items.map((item, itemIndex) => (
+                  <li key={`ol-${index}-${itemIndex}`}>{item}</li>
+                ))}
+              </ol>
+            );
+          }
+
+          return (
+            <p className="ai-paragraph" key={`p-${index}`}>
+              {block.text}
+            </p>
+          );
+        })}
+      </div>
+    );
+  }
+
   async function streamLikeUpdate(targetTurnId: string, fullText: string) {
     console.log('[UI] Starting simulated stream render', { chars: fullText.length, targetTurnId });
     let rendered = '';
@@ -250,7 +481,8 @@ export default function SearchInterface() {
 
       if (!response.ok) {
         console.log('[UI] /api/chat returned an error response', { status: response.status, json });
-        throw new Error(json?.error ?? 'Request failed. Please try again.');
+        const details = [json?.error, json?.recovery].filter(Boolean).join(' ');
+        throw new Error(details || 'Request failed. Please try again.');
       }
 
       const answer = json?.answer ?? '';
@@ -331,6 +563,37 @@ export default function SearchInterface() {
       ),
     );
     void sendMessage(lastUser);
+  }
+
+  function exportConversationToPdf() {
+    const turns = activeConversation?.turns ?? [];
+    if (turns.length === 0) {
+      console.log('[UI] PDF export skipped: no conversation');
+      showToast('Start a conversation before exporting PDF');
+      return;
+    }
+
+    console.log('[UI] Starting PDF export', {
+      conversationId: activeConversation?.id,
+      turnCount: turns.length,
+    });
+
+    const title = activeConversation?.title || 'New chat';
+    const exportedAt = new Date().toLocaleString();
+    const printable = buildPrintableConversationHtml(title, turns, exportedAt, getModeLabel);
+    const printWindow = window.open('', '_blank', 'noopener,noreferrer,width=920,height=900');
+    if (!printWindow) {
+      console.log('[UI] PDF export failed: popup blocked');
+      showToast('Enable popups to export PDF');
+      return;
+    }
+
+    printWindow.document.write(printable);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+    console.log('[UI] PDF export print dialog requested');
+    showToast('Print dialog opened. Choose Save as PDF.');
   }
 
   return (
@@ -427,6 +690,14 @@ export default function SearchInterface() {
                   </button>
                 ))}
               </div>
+              <button
+                type="button"
+                className="top-action-btn"
+                data-testid="pdf-export-btn"
+                onClick={exportConversationToPdf}
+              >
+                Export PDF
+              </button>
             </div>
 
             {!activeConversation || activeConversation.turns.length === 0 ? (
@@ -472,7 +743,13 @@ export default function SearchInterface() {
                               {turn.error}
                             </div>
                           ) : (
-                            <div className="ai-text">{turn.assistant || (pendingTurnId === turn.id ? 'Thinking…' : '')}</div>
+                            <div className="ai-text">
+                              {turn.assistant
+                                ? renderStructuredAssistantText(turn.assistant)
+                                : pendingTurnId === turn.id
+                                  ? 'Thinking…'
+                                  : ''}
+                            </div>
                           )}
 
                           <div className="source-bar">
@@ -568,19 +845,19 @@ export default function SearchInterface() {
       <style jsx global>{`
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         :root {
-          --bg: #f8f5ef;
-          --main-bg: #fcfaf6;
-          --sidebar-bg: #f4efe5;
-          --sidebar-hover: #ece5d8;
-          --sidebar-active: #e8decc;
-          --input-bg: #fdfbf8;
-          --border: #e4dccf;
-          --text-primary: #2f2922;
-          --text-secondary: #5a4f43;
-          --text-tertiary: #857768;
-          --accent: #b66a2d;
-          --accent-hover: #9e5b24;
-          --send-bg: #2f2922;
+          --bg: #ffffff;
+          --main-bg: #ffffff;
+          --sidebar-bg: #f9f9f9;
+          --sidebar-hover: #ececec;
+          --sidebar-active: #ececec;
+          --input-bg: #ffffff;
+          --border: #e5e5e5;
+          --text-primary: #0f172a;
+          --text-secondary: #374151;
+          --text-tertiary: #6b7280;
+          --accent: #10a37f;
+          --accent-hover: #0e8f70;
+          --send-bg: #111111;
           --send-color: #ffffff;
           --radius-sm: 6px;
           --radius-md: 12px;
@@ -591,12 +868,9 @@ export default function SearchInterface() {
         html, body, .search-ui {
           height: 100%;
           overflow: hidden;
-          background:
-            radial-gradient(circle at 18% -18%, rgba(182, 106, 45, 0.08), transparent 52%),
-            radial-gradient(circle at 96% -14%, rgba(164, 122, 91, 0.08), transparent 40%),
-            var(--bg);
+          background: var(--bg);
           color: var(--text-primary);
-          font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+          font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
         }
         #app { display: flex; height: 100vh; overflow: hidden; padding-top: 56px; position: relative; }
         #app-header {
@@ -606,8 +880,7 @@ export default function SearchInterface() {
           right: 0;
           height: 56px;
           border-bottom: 1px solid var(--border);
-          background: rgba(252, 250, 246, 0.92);
-          backdrop-filter: saturate(160%) blur(10px);
+          background: #ffffff;
           z-index: 80;
         }
         .app-header-inner {
@@ -622,7 +895,7 @@ export default function SearchInterface() {
           font-size: 18px;
           line-height: 1;
           letter-spacing: -0.02em;
-          color: #2f2922;
+          color: var(--text-primary);
         }
         #sidebar {
           width: var(--sidebar-w);
@@ -642,7 +915,7 @@ export default function SearchInterface() {
           padding: 10px 12px;
           border: 1px solid var(--border);
           border-radius: 11px;
-          background: #faf7f1;
+          background: #ffffff;
           color: var(--text-secondary);
           text-align: left;
           font-weight: 500;
@@ -656,7 +929,7 @@ export default function SearchInterface() {
         .model-selector, .model-option {
           width: 100%;
           border: 1px solid var(--border);
-          background: #fdfbf8;
+          background: #ffffff;
           color: var(--text-primary);
           border-radius: 10px;
           padding: 9px 10px;
@@ -673,9 +946,9 @@ export default function SearchInterface() {
           border: 1px solid var(--border);
           padding: 8px;
           border-radius: var(--radius-md);
-          box-shadow: 0 12px 28px rgba(59, 46, 35, 0.12);
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
         }
-        .model-option.selected { outline: 1px solid var(--accent); }
+        .model-option.selected { outline: 1px solid var(--accent); background: #f0fdf9; }
 
         #main {
           flex: 1;
@@ -683,7 +956,7 @@ export default function SearchInterface() {
           flex-direction: column;
           overflow: hidden;
           background: var(--main-bg);
-          border-left: 1px solid rgba(255,255,255,0.55);
+          border-left: 1px solid #ffffff;
         }
         #topbar {
           display: flex;
@@ -691,14 +964,23 @@ export default function SearchInterface() {
           gap: 8px;
           padding: 12px 16px;
           border-bottom: 1px solid var(--border);
-          background: rgba(252, 250, 246, 0.9);
-          backdrop-filter: saturate(160%) blur(14px);
+          background: #ffffff;
         }
         #sidebar-toggle { background: transparent; border: none; color: var(--text-secondary); }
         #chat-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
-        #mode-pills { display: flex; gap: 3px; padding: 3px; border-radius: 20px; border: 1px solid var(--border); background: #f8f3ea; }
+        #mode-pills { display: flex; gap: 3px; padding: 3px; border-radius: 20px; border: 1px solid var(--border); background: #f7f7f7; }
         .mode-pill { border: none; background: transparent; color: var(--text-secondary); padding: 4px 12px; border-radius: 20px; }
-        .mode-pill.active { color: #fff; background: #7a6047; }
+        .mode-pill.active { color: #ffffff; background: var(--accent); }
+        .top-action-btn {
+          border: 1px solid var(--border);
+          background: #ffffff;
+          color: var(--text-secondary);
+          border-radius: 999px;
+          padding: 7px 12px;
+          font-size: 13px;
+          cursor: pointer;
+        }
+        .top-action-btn:hover { border-color: #d1d5db; background: #f9fafb; color: var(--text-primary); }
 
         #welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; gap: 20px; }
         #welcome h1 { font-size: 36px; line-height: 1.1; letter-spacing: -0.02em; font-weight: 600; }
@@ -711,7 +993,7 @@ export default function SearchInterface() {
         }
         .suggestion-btn {
           border: 1px solid var(--border);
-          background: linear-gradient(180deg, #fefcf9, #f7f0e4);
+          background: #ffffff;
           color: var(--text-secondary);
           border-radius: var(--radius-md);
           padding: 14px 16px;
@@ -719,7 +1001,7 @@ export default function SearchInterface() {
           min-height: 84px;
           line-height: 1.35;
         }
-        .suggestion-btn:hover { background: #f2eadc; color: var(--text-primary); border-color: #d8ccb9; }
+        .suggestion-btn:hover { background: #f9fafb; color: var(--text-primary); border-color: #d1d5db; }
 
         #messages-wrap { flex: 1; overflow-y: auto; }
         #messages { max-width: 840px; margin: 0 auto; padding: 22px 20px; }
@@ -727,8 +1009,8 @@ export default function SearchInterface() {
         .user-msg { display: flex; justify-content: flex-end; margin-bottom: 12px; }
         .user-bubble {
           max-width: 80%;
-          background: #f3ebdf;
-          border: 1px solid #e2d7c5;
+          background: #f3f4f6;
+          border: 1px solid #e5e7eb;
           border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg);
           padding: 12px 14px;
           white-space: pre-wrap;
@@ -739,14 +1021,32 @@ export default function SearchInterface() {
           white-space: pre-wrap;
           line-height: 1.72;
           font-size: 16px;
-          color: #3a3128;
+          color: #111827;
         }
-        .search-indicator { color: #8c5a2f; font-size: 13px; margin-bottom: 8px; font-weight: 600; }
+        .ai-rich { display: flex; flex-direction: column; gap: 10px; }
+        .ai-section-title {
+          font-size: 15px;
+          font-weight: 700;
+          color: var(--text-primary);
+          margin-top: 2px;
+        }
+        .ai-paragraph { margin: 0; color: #111827; }
+        .ai-list {
+          margin: 0;
+          padding-left: 22px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .ai-list li { color: #111827; }
+        .ai-list-ol { list-style-type: decimal; }
+        .ai-list-ul { list-style-type: disc; }
+        .search-indicator { color: var(--accent); font-size: 13px; margin-bottom: 8px; font-weight: 600; }
         .source-bar { margin-top: 10px; display: flex; gap: 6px; }
-        .source-pill { font-size: 11px; border-radius: 20px; padding: 2px 9px; border: 1px solid var(--border); background: #f9f3e9; }
-        .source-pill.web { color: #6b4c2f; border-color: #dccab4; background: #f7efe2; }
-        .source-pill.enterprise { color: #7a5a2e; border-color: #e0ceb2; background: #f8efdf; }
-        .source-pill.auto { color: #5f5448; border-color: #ddd2c2; background: #f3ece1; }
+        .source-pill { font-size: 11px; border-radius: 20px; padding: 2px 9px; border: 1px solid #d1fae5; background: #ecfdf5; color: #047857; }
+        .source-pill.web { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
+        .source-pill.enterprise { color: #0369a1; border-color: #bae6fd; background: #f0f9ff; }
+        .source-pill.auto { color: #374151; border-color: #e5e7eb; background: #f9fafb; }
         .citations { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
         .cite-item {
           display: flex;
@@ -754,35 +1054,35 @@ export default function SearchInterface() {
           gap: 7px;
           text-decoration: none;
           color: inherit;
-          background: #fbf7f0;
+          background: #ffffff;
           border: 1px solid var(--border);
           border-radius: var(--radius-sm);
           padding: 8px 10px;
         }
-        .cite-item:hover { border-color: #d9ceb9; background: #f6efe3; }
-        .cite-num { width: 18px; height: 18px; border-radius: 50%; background: #eee4d5; display: flex; align-items: center; justify-content: center; font-size: 10px; }
+        .cite-item:hover { border-color: #d1d5db; background: #f9fafb; }
+        .cite-num { width: 18px; height: 18px; border-radius: 50%; background: #e5e7eb; display: flex; align-items: center; justify-content: center; font-size: 10px; }
         .cite-title { font-size: 12px; }
         .action-bar { margin-top: 8px; display: flex; gap: 6px; }
         .action-btn { border: none; color: var(--text-tertiary); background: transparent; padding: 4px 8px; border-radius: var(--radius-sm); }
-        .action-btn:hover { background: #eee4d5; color: var(--text-secondary); }
+        .action-btn:hover { background: #f3f4f6; color: var(--text-secondary); }
         .error-bubble { background: #fff3f3; border: 1px solid #f7cccc; border-radius: var(--radius-md); padding: 10px 12px; color: #c53030; }
 
         #input-area {
           border-top: 1px solid var(--border);
           padding: 14px 16px 20px;
-          background: linear-gradient(180deg, rgba(252,250,246,0), rgba(252,250,246,0.95) 40%);
+          background: #ffffff;
         }
         #input-wrapper {
           max-width: 840px;
           margin: 0 auto;
           background: var(--input-bg);
-          border: 1px solid #dfd3c2;
+          border: 1px solid #d1d5db;
           border-radius: 20px;
           padding: 10px 14px;
           display: flex;
           flex-direction: column;
           gap: 8px;
-          box-shadow: 0 8px 22px rgba(67, 48, 30, 0.1);
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
         }
         #message-input {
           width: 100%;
@@ -796,22 +1096,22 @@ export default function SearchInterface() {
           font-size: 16px;
           line-height: 1.5;
         }
-        #message-input::placeholder { color: #978778; }
+        #message-input::placeholder { color: #9ca3af; }
         #input-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         .tool-btn { border: none; color: var(--text-tertiary); background: transparent; padding: 5px 7px; border-radius: var(--radius-sm); }
         #input-right { display: flex; align-items: center; gap: 8px; }
         #char-count { font-size: 11px; color: var(--text-tertiary); }
         #send-btn { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--send-bg); color: var(--send-color); }
-        #send-btn:hover { background: #1f1a16; }
-        #send-btn:disabled { background: #ddd3c5; color: #9c907f; cursor: not-allowed; }
+        #send-btn:hover { background: #000000; }
+        #send-btn:disabled { background: #e5e7eb; color: #9ca3af; cursor: not-allowed; }
         #footer-note { max-width: 760px; margin: 10px auto 0; font-size: 12px; color: var(--text-tertiary); text-align: center; }
 
-        #toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: #fcf7ef; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 9px 18px; font-size: 13px; color: var(--text-primary); z-index: 200; opacity: 0; transition: opacity .25s; pointer-events: none; box-shadow: 0 10px 24px rgba(48,37,25,0.12); }
+        #toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: #111827; border: 1px solid #111827; border-radius: var(--radius-md); padding: 9px 18px; font-size: 13px; color: #ffffff; z-index: 200; opacity: 0; transition: opacity .25s; pointer-events: none; box-shadow: 0 10px 24px rgba(15,23,42,0.2); }
         #toast.show { opacity: 1; }
 
         .boundary-fallback { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: var(--main-bg); color: var(--text-primary); padding: 24px; }
         .boundary-actions { display: flex; gap: 8px; }
-        .boundary-actions button { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #f7f0e5; color: var(--text-primary); padding: 8px 10px; }
+        .boundary-actions button { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #ffffff; color: var(--text-primary); padding: 8px 10px; }
 
         ::view-transition-group(*),
         ::view-transition-old(*),
