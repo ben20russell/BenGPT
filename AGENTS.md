@@ -53,9 +53,8 @@
   - `npm run build`
 - After every code update, ensure the local host network is running so changes can be viewed in-browser:
   - Start or confirm dev server with `npm run dev`.
-  - Capture and report the actual active Vite local URL printed in terminal (for example: `http://127.0.0.1:3004/`).
-  - Verify a listener exists on the chosen localhost port (example: `lsof -nP -iTCP -sTCP:LISTEN | rg 3004`).
-  - Always share the active localhost network URL in the completion message.
-  - Always provide one fixed and currently working localhost URL after every update.
-  - If multiple local servers are running, choose one URL, confirm it is listening, and report only that single fixed URL.
+  - Use this fixed localhost URL: `http://127.0.0.1:3011/`.
+  - Verify a listener exists on this port (example: `lsof -nP -iTCP:3011 -sTCP:LISTEN`).
+  - Always share this exact localhost URL in the completion message.
+  - If `3011` is unavailable, free the port and restart so `http://127.0.0.1:3011/` is active.
 - If you encounter the runtime/tooling error `stream disconnected before completion: response.failed event received`, continue the task and retry or proceed with the next safe step instead of stopping.
