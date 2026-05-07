@@ -40,6 +40,31 @@ type ResponsesApi = {
   };
 };
 
+function normalizeAzureEndpoint(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  return trimmed.replace(/\/openai$/i, "");
+}
+
+function getAzureConfig() {
+  const apiKey = process.env.AZURE_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
+  const endpoint = normalizeAzureEndpoint(
+    process.env.AZURE_OPENAI_ENDPOINT ?? process.env.OPENAI_ENDPOINT,
+  );
+  const deployment =
+    process.env.AZURE_OPENAI_DEPLOYMENT ??
+    process.env.AZURE_OPENAI_DEPLOYMENT_NAME ??
+    process.env.AZURE_OPENAI_MODEL ??
+    process.env.OPENAI_MODEL;
+
+  const missing: string[] = [];
+  if (!apiKey) missing.push("AZURE_OPENAI_API_KEY");
+  if (!endpoint) missing.push("AZURE_OPENAI_ENDPOINT");
+  if (!deployment) missing.push("AZURE_OPENAI_DEPLOYMENT");
+
+  return { apiKey, endpoint, deployment, missing };
+}
+
 export async function POST(req: NextRequest) {
   try {
     console.log("[/api/chat] Received request");
@@ -66,17 +91,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (
-      !process.env.AZURE_OPENAI_API_KEY ||
-      !process.env.AZURE_OPENAI_ENDPOINT ||
-      !process.env.AZURE_OPENAI_DEPLOYMENT
-    ) {
-      console.log("[/api/chat] Missing Azure OpenAI environment variables");
+    const config = getAzureConfig();
+
+    if (config.missing.length > 0) {
+      console.log("[/api/chat] Missing Azure OpenAI environment variables", {
+        missing: config.missing,
+      });
       return NextResponse.json(
         {
           error: "Server configuration is incomplete.",
-          recovery:
-            "Set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_DEPLOYMENT in Vercel project settings.",
+          recovery: `Set ${config.missing.join(", ")} in Vercel project settings for this deployment.`,
         },
         { status: 500 },
       );
@@ -84,17 +108,17 @@ export async function POST(req: NextRequest) {
 
     console.log("[/api/chat] Calling Azure OpenAI responses.create", {
       searchMode,
-      deployment: process.env.AZURE_OPENAI_DEPLOYMENT,
+      deployment: config.deployment,
     });
 
     const client = new OpenAI({
-      apiKey: process.env.AZURE_OPENAI_API_KEY,
-      baseURL: `${process.env.AZURE_OPENAI_ENDPOINT}openai/v1/`,
+      apiKey: config.apiKey,
+      baseURL: `${config.endpoint}/openai/v1/`,
     });
 
     // Map modes: "quick" | "agentic" | "deep_research"
     const response = await (client as unknown as ResponsesApi).responses.create({
-      model: process.env.AZURE_OPENAI_DEPLOYMENT,
+      model: config.deployment,
       tools: [
         {
           type: "web_search",
