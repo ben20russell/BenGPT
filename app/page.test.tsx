@@ -1,8 +1,13 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { beforeEach } from 'vitest';
 import SearchInterface from './search-interface';
 
 describe('SearchInterface', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
   it('renders app directly and keeps send disabled until input', () => {
     render(<SearchInterface />);
 
@@ -13,6 +18,12 @@ describe('SearchInterface', () => {
   it('shows the personalized welcome heading on the empty state', () => {
     render(<SearchInterface />);
     expect(screen.getByTestId('welcome-heading')).toHaveTextContent('Ask me anything!');
+  });
+
+  it('links the Beacon Search AI header brand back to the main page', () => {
+    render(<SearchInterface />);
+    const homeLink = screen.getByTestId('brand-home-link');
+    expect(homeLink).toHaveAttribute('href', '/');
   });
 
   it('enables send after entering a message', async () => {

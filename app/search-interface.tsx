@@ -2,6 +2,7 @@
 
 import React, { Component, type ErrorInfo, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
+import Link from 'next/link';
 
 type SearchMode = 'quick' | 'web_search' | 'thinking' | 'deep_research';
 
@@ -58,6 +59,11 @@ type Conversation = {
 type RecentSearchesResponse = {
   conversations?: Conversation[];
   activeConversationId?: string | null;
+};
+
+type RecentSearchesLocalSnapshot = {
+  conversations: Conversation[];
+  activeConversationId: string | null;
 };
 
 type BoundaryState = {
@@ -613,6 +619,10 @@ export default function SearchInterface() {
   );
   const hasResults = Boolean(activeConversation && activeConversation.turns.length > 0);
 
+  function getRecentsStorageKey(currentDeviceId: string) {
+    return `beacon-search-recents:${currentDeviceId}`;
+  }
+
   useEffect(() => {
     console.log('[UI] Component mounted');
     if (process.env.NODE_ENV === 'test') return;
@@ -650,6 +660,24 @@ export default function SearchInterface() {
 
     async function loadRecents() {
       try {
+        const localStorageKey = getRecentsStorageKey(deviceId);
+        const localRaw = window.localStorage.getItem(localStorageKey);
+        if (localRaw) {
+          const localParsed = JSON.parse(localRaw) as Partial<RecentSearchesLocalSnapshot>;
+          const localConversations = Array.isArray(localParsed.conversations) ? localParsed.conversations : [];
+          const localActive =
+            typeof localParsed.activeConversationId === 'string' ? localParsed.activeConversationId : null;
+          const localHasActive = localActive
+            ? localConversations.some((conversation) => conversation.id === localActive)
+            : false;
+          setConversations(localConversations);
+          setActiveConversationId(localHasActive ? localActive : null);
+          console.log('[UI] Loaded recent searches from local backup', {
+            count: localConversations.length,
+            activeConversationId: localHasActive ? localActive : null,
+          });
+        }
+
         console.log('[UI] Loading recent searches', { deviceId });
         const endpoint = process.env.NODE_ENV === 'test' ? 'http://localhost/api/recent-searches' : '/api/recent-searches';
         const response = await fetch(endpoint, {
@@ -670,13 +698,16 @@ export default function SearchInterface() {
         const nextConversations = Array.isArray(json.conversations) ? json.conversations : [];
         const nextActiveId = typeof json.activeConversationId === 'string' ? json.activeConversationId : null;
         const hasActive = nextActiveId ? nextConversations.some((conversation) => conversation.id === nextActiveId) : false;
-
-        setConversations(nextConversations);
-        setActiveConversationId(hasActive ? nextActiveId : null);
-        console.log('[UI] Recent searches loaded', {
-          count: nextConversations.length,
-          activeConversationId: hasActive ? nextActiveId : null,
-        });
+        if (nextConversations.length > 0 || hasActive) {
+          setConversations(nextConversations);
+          setActiveConversationId(hasActive ? nextActiveId : null);
+          console.log('[UI] Recent searches loaded from server', {
+            count: nextConversations.length,
+            activeConversationId: hasActive ? nextActiveId : null,
+          });
+        } else {
+          console.log('[UI] Server recent searches empty; retaining local backup if present');
+        }
       } catch (error) {
         console.log('[UI] Failed to load recent searches', { error });
       } finally {
@@ -696,6 +727,22 @@ export default function SearchInterface() {
     if (!deviceId) return;
     if (!recentsHydrated) return;
     if (isLoading) return;
+
+    try {
+      const localStorageKey = getRecentsStorageKey(deviceId);
+      const payload: RecentSearchesLocalSnapshot = {
+        conversations,
+        activeConversationId,
+      };
+      window.localStorage.setItem(localStorageKey, JSON.stringify(payload));
+      console.log('[UI] Saved recent searches to local backup', {
+        key: localStorageKey,
+        count: conversations.length,
+        activeConversationId,
+      });
+    } catch (error) {
+      console.log('[UI] Failed to save recent searches to local backup', { error });
+    }
 
     let cancelled = false;
 
@@ -1347,10 +1394,12 @@ export default function SearchInterface() {
         <div id="app" data-testid="app-root">
           <header id="app-header" data-testid="app-header">
             <div className="app-header-inner">
-              <div className="brand-mark" data-testid="brand-mark">
-                <Image src="/lighthouse.svg" alt="Beacon Search lighthouse logo" width={30} height={30} />
-              </div>
-              <h1>Beacon Search AI</h1>
+              <Link href="/" className="brand-home-link" data-testid="brand-home-link">
+                <div className="brand-mark" data-testid="brand-mark">
+                  <Image src="/lighthouse.svg" alt="Beacon Search lighthouse logo" width={30} height={30} />
+                </div>
+                <h1>Beacon Search AI</h1>
+              </Link>
             </div>
           </header>
 
@@ -1734,8 +1783,19 @@ export default function SearchInterface() {
           height: 100%;
           display: flex;
           align-items: center;
-          gap: 10px;
           padding: 0 14px;
+        }
+        .brand-home-link {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          color: inherit;
+          text-decoration: none;
+        }
+        .brand-home-link:focus-visible {
+          outline: 2px solid #111111;
+          outline-offset: 4px;
+          border-radius: 10px;
         }
         .brand-mark {
           width: 30px;
