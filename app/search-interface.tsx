@@ -1,6 +1,6 @@
 'use client';
 
-import React, { Component, type ErrorInfo, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Component, type ErrorInfo, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 
@@ -908,12 +908,18 @@ export default function SearchInterface() {
     return newId;
   }
 
-  function newChat() {
+  function startNewChat() {
     console.log('[UI] Starting a new chat');
     setActiveConversationId(null);
     setInput('');
     setPendingTurnId(null);
     setSearching(false);
+  }
+
+  function onBrandNewChatClick(event: MouseEvent<HTMLAnchorElement>) {
+    event.preventDefault();
+    console.log('[UI] Brand link clicked; starting a new chat');
+    startNewChat();
   }
 
   function renameConversation(conversationId: string, nextTitleRaw: string) {
@@ -1489,7 +1495,12 @@ export default function SearchInterface() {
         <div id="app" data-testid="app-root">
           <header id="app-header" data-testid="app-header">
             <div className="app-header-inner">
-              <Link href="/" className="brand-home-link" data-testid="brand-home-link">
+              <Link
+                href="/"
+                className="brand-home-link"
+                data-testid="brand-home-link"
+                onClick={onBrandNewChatClick}
+              >
                 <div className="brand-mark" data-testid="brand-mark">
                   <Image src="/lighthouse.svg" alt="Beacon Search lighthouse logo" width={30} height={30} />
                 </div>
@@ -1500,7 +1511,7 @@ export default function SearchInterface() {
 
           <aside id="sidebar" className={!sidebarOpen ? 'collapsed' : ''} data-testid="sidebar">
             <div id="sidebar-top">
-              <button id="new-chat-btn" data-testid="new-chat-btn" type="button" onClick={newChat}>
+              <button id="new-chat-btn" data-testid="new-chat-btn" type="button" onClick={startNewChat}>
                 New chat
               </button>
             </div>
