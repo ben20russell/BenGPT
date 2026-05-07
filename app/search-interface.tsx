@@ -1,6 +1,15 @@
 'use client';
 
-import React, { Component, type ErrorInfo, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  Component,
+  type ErrorInfo,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 
@@ -826,7 +835,7 @@ export default function SearchInterface() {
   useEffect(() => {
     if (!toolsMenuOpen) return;
 
-    function onDocClick(event: MouseEvent) {
+    function onDocClick(event: globalThis.MouseEvent) {
       if (!toolsMenuRef.current) return;
       if (!toolsMenuRef.current.contains(event.target as Node)) {
         setToolsMenuOpen(false);
@@ -916,7 +925,7 @@ export default function SearchInterface() {
     setSearching(false);
   }
 
-  function onBrandNewChatClick(event: MouseEvent<HTMLAnchorElement>) {
+  function onBrandNewChatClick(event: ReactMouseEvent<HTMLAnchorElement>) {
     event.preventDefault();
     console.log('[UI] Brand link clicked; starting a new chat');
     startNewChat();
