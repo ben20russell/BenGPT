@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { appendFile, readFile } from "node:fs/promises";
 import path from "node:path";
+import { execFile } from "node:child_process";
 import { AzureOpenAI } from "openai";
 import { toUserFacingChatError } from "./error-mapper";
 
@@ -188,45 +189,87 @@ const MEMORY_FILE_CANDIDATES = [
   path.resolve(process.cwd(), "AI_memory.txt"),
   path.resolve(process.cwd(), "..", "AI_memory.txt"),
 ];
+const MEMORY_RETRIEVER_SCRIPT_CANDIDATES = [
+  path.resolve(process.cwd(), "scripts", "retrieve_memory.py"),
+  path.resolve(process.cwd(), "..", "my-gpt-search", "scripts", "retrieve_memory.py"),
+  path.resolve(process.cwd(), "..", "scripts", "retrieve_memory.py"),
+];
 
 function resolveUseMemory(raw: unknown): boolean {
   return typeof raw === "boolean" ? raw : DEFAULT_USE_MEMORY;
 }
 
-async function buildInstructionsWithOptionalMemory(useMemory: boolean): Promise<string> {
+function runMemoryRetriever(scriptPath: string, userQuery: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "python3",
+      [scriptPath, userQuery],
+      {
+        maxBuffer: 1024 * 1024 * 2,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(
+            new Error(
+              `memory retriever failed (${scriptPath}): ${error.message}${stderr ? ` | ${stderr}` : ""}`,
+            ),
+          );
+          return;
+        }
+        resolve(stdout || "");
+      },
+    );
+  });
+}
+
+async function get_relevant_memory(user_query: string): Promise<string[]> {
+  for (const scriptPath of MEMORY_RETRIEVER_SCRIPT_CANDIDATES) {
+    try {
+      const raw = await runMemoryRetriever(scriptPath, user_query);
+      const parsed = JSON.parse(raw) as { chunks?: unknown };
+      const chunks = Array.isArray(parsed.chunks)
+        ? parsed.chunks.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [];
+      if (chunks.length > 0) {
+        console.log("[/api/chat] Retrieved relevant memory chunks", {
+          scriptPath,
+          chunkCount: chunks.length,
+        });
+      } else {
+        console.log("[/api/chat] Memory retrieval returned no chunks", { scriptPath });
+      }
+      return chunks.slice(0, 3);
+    } catch (error) {
+      console.log("[/api/chat] Memory retrieval attempt failed", { scriptPath, error });
+    }
+  }
+  return [];
+}
+
+async function buildInstructionsWithOptionalMemory(useMemory: boolean, userQuery: string | undefined): Promise<string> {
   if (!useMemory) {
     console.log("[/api/chat] Memory disabled for this request.");
     return RESPONSE_FORMAT_INSTRUCTIONS;
   }
 
-  for (const memoryPath of MEMORY_FILE_CANDIDATES) {
-    try {
-      const memoryText = (await readFile(memoryPath, "utf8")).trim();
-
-      if (!memoryText) {
-        console.log("[/api/chat] Memory file found but empty", { memoryPath });
-        continue;
-      }
-
-      console.log("[/api/chat] Memory loaded and appended to instructions", {
-        memoryPath,
-        chars: memoryText.length,
-      });
-
-      return [
-        RESPONSE_FORMAT_INSTRUCTIONS,
-        "",
-        MEMORY_HEADER,
-        "Use this memory to understand the user's preferences and prior context, while prioritizing the user's current question.",
-        memoryText,
-      ].join("\n");
-    } catch (error) {
-      console.log("[/api/chat] Memory read attempt failed", { memoryPath, error });
-    }
+  if (!userQuery?.trim()) {
+    console.log("[/api/chat] Memory enabled but no user query text; skipping retrieval.");
+    return RESPONSE_FORMAT_INSTRUCTIONS;
   }
 
-  console.log("[/api/chat] Memory enabled but no readable AI_memory.txt found.");
-  return RESPONSE_FORMAT_INSTRUCTIONS;
+  const relevantChunks = await get_relevant_memory(userQuery);
+  if (relevantChunks.length === 0) {
+    console.log("[/api/chat] Memory retrieval returned no usable chunks.");
+    return RESPONSE_FORMAT_INSTRUCTIONS;
+  }
+
+  return [
+    RESPONSE_FORMAT_INSTRUCTIONS,
+    "",
+    MEMORY_HEADER,
+    "Use only these retrieved memory chunks when relevant to the current query. Do not assume unlisted memory.",
+    ...relevantChunks.map((chunk, index) => `Memory chunk ${index + 1}:\n${chunk}`),
+  ].join("\n\n");
 }
 
 async function getMemoryWritePath(): Promise<string> {
@@ -454,7 +497,7 @@ export async function POST(req: NextRequest) {
     };
 
     const preset = SEARCH_PRESETS[searchMode];
-    const instructions = await buildInstructionsWithOptionalMemory(useMemory);
+    const instructions = await buildInstructionsWithOptionalMemory(useMemory, text);
     const baseRequest: ChatResponsesRequest = {
       model: config.deployment,
       instructions,
