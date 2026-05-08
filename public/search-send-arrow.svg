@@ -1,0 +1,7 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Send</title>
+  <desc id="desc">Dark circular send icon with an upward white arrow.</desc>
+  <circle cx="32" cy="32" r="30" fill="#5f6368"/>
+  <path d="M32 20V42" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M22 30L32 20L42 30" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1968,7 +1968,7 @@ export default function SearchInterface() {
                   <div className="tools-menu-wrap" ref={toolsMenuRef}>
                     <button
                       type="button"
-                      className="tool-circle-btn"
+                      className="tool-circle-btn add-btn"
                       data-testid="tools-add-btn"
                       aria-label="Open add menu"
                       title="Add"
@@ -1976,9 +1976,14 @@ export default function SearchInterface() {
                       aria-expanded={toolsMenuOpen}
                       onClick={showAddMenu}
                     >
-                      <span className="plus-glyph" aria-hidden="true">
-                        +
-                      </span>
+                      <Image
+                        src="/tools-add-plus.svg"
+                        alt=""
+                        aria-hidden="true"
+                        width={26}
+                        height={26}
+                        className="add-glyph-image"
+                      />
                     </button>
                     <button
                       type="button"
@@ -2071,7 +2076,18 @@ export default function SearchInterface() {
                       className={isLoading ? 'loading' : ''}
                       onClick={() => void sendMessage()}
                     >
-                      {isLoading ? '■' : <span className="send-glyph" aria-hidden="true">↑</span>}
+                      {isLoading ? (
+                        '■'
+                      ) : (
+                        <Image
+                          src="/search-send-arrow.svg"
+                          alt=""
+                          aria-hidden="true"
+                          width={26}
+                          height={26}
+                          className="send-glyph-image"
+                        />
+                      )}
                     </button>
                   </div>
                 </div>
@@ -2573,16 +2589,14 @@ export default function SearchInterface() {
           gap: 0;
           position: relative;
         }
-        .plus-glyph {
-          position: absolute;
-          inset: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 22px;
-          line-height: 1;
-          font-weight: 300;
-          transform: translateY(-1px);
+        .tool-circle-btn.add-btn {
+          border: none;
+          background: transparent;
+          overflow: hidden;
+        }
+        .add-glyph-image {
+          width: 100%;
+          height: 100%;
           pointer-events: none;
         }
         .tool-circle-btn:hover { background: #f8fafc; border-color: #d6d6d6; }
@@ -2695,25 +2709,26 @@ export default function SearchInterface() {
           height: 32px;
           border-radius: 50%;
           border: none;
-          background: #eef6ff;
+          background: transparent;
           color: #0f172a;
           font-size: 16px;
           display: inline-flex;
           align-items: center;
           justify-content: center;
           position: relative;
+          padding: 0;
+          overflow: hidden;
         }
-        .send-glyph {
+        .send-glyph-image {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          font-size: 15px;
-          line-height: 1;
-          font-weight: 600;
+          width: 100%;
+          height: 100%;
           pointer-events: none;
         }
-        #send-btn:hover { background: #dceeff; }
-        #send-btn:disabled { background: #e5e7eb; color: #9ca3af; cursor: not-allowed; }
+        #send-btn:hover { filter: brightness(1.06); }
+        #send-btn:disabled { filter: grayscale(0.18) brightness(0.95); cursor: not-allowed; }
         .subheader-copy { padding-top: 25px; }
 
         #toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: #111827; border: 1px solid #111827; border-radius: var(--radius-md); padding: 9px 18px; font-size: 13px; color: #ffffff; z-index: 200; opacity: 0; transition: opacity .25s; pointer-events: none; box-shadow: 0 10px 24px rgba(15,23,42,0.2); }
@@ -2771,7 +2786,6 @@ export default function SearchInterface() {
           .citations { gap: 7px; }
           .cite-item { padding: 10px; }
           .tool-circle-btn { width: 30px; height: 30px; }
-          .plus-glyph { font-size: 20px; transform: translateY(-1px); }
           .composer-mode-label { font-size: 15px; }
           .prefs-glyph { width: 14px; height: 10px; }
           .prefs-line-top::before,
