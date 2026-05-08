@@ -141,22 +141,31 @@ describe('SearchInterface', () => {
     const user = userEvent.setup();
     render(<SearchInterface />);
 
-    await user.click(screen.getByTestId('tools-dropdown-btn'));
+    await user.click(screen.getByTestId('tools-preferences-btn'));
 
     const options = screen
       .getAllByTestId(/^search-mode-option-/)
       .map((element) => element.textContent?.trim());
 
-    expect(options).toEqual(['Quick', 'Web Search', 'Thinking', 'Deep Research']);
+    expect(options).toEqual(['Quick Search', 'Web Search', 'Thinking', 'Deep Research']);
   });
 
-  it('shows a More Route Info option in the tools dropdown', async () => {
+  it('does not show More Route Info in composer menus', async () => {
     const user = userEvent.setup();
     render(<SearchInterface />);
 
-    await user.click(screen.getByTestId('tools-dropdown-btn'));
+    await user.click(screen.getByTestId('tools-add-btn'));
+    expect(screen.queryByTestId('more-route-info-btn')).not.toBeInTheDocument();
+  });
 
-    expect(screen.getByTestId('more-route-info-btn')).toBeInTheDocument();
+  it('renders Gemini-style composer controls', () => {
+    render(<SearchInterface />);
+    expect(screen.getByTestId('tools-add-btn')).toBeInTheDocument();
+    expect(screen.getByTestId('tools-preferences-btn')).toBeInTheDocument();
+    expect(screen.queryByTestId('tools-dropdown-btn')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('pro-mode-btn')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('voice-input-btn')).not.toBeInTheDocument();
+    expect(screen.getByTestId('send-btn')).toBeInTheDocument();
   });
 
   it('sends selected mode in /api/chat payload', async () => {
@@ -170,7 +179,7 @@ describe('SearchInterface', () => {
 
     render(<SearchInterface />);
 
-    await user.click(screen.getByTestId('tools-dropdown-btn'));
+    await user.click(screen.getByTestId('tools-preferences-btn'));
     await user.click(screen.getByTestId('search-mode-option-deep_research'));
     await user.type(screen.getByTestId('message-input'), 'Research this deeply');
     await user.click(screen.getByTestId('send-btn'));
@@ -204,7 +213,7 @@ describe('SearchInterface', () => {
 
     const file = new File(['hello file'], 'notes.txt', { type: 'text/plain' });
     await user.upload(screen.getByTestId('file-input'), file);
-    await user.click(screen.getByTestId('tools-dropdown-btn'));
+    await user.click(screen.getByTestId('tools-add-btn'));
     await user.click(screen.getByTestId('add-git-code-btn'));
     await user.type(screen.getByTestId('message-input'), 'Use attached context');
     await user.click(screen.getByTestId('send-btn'));
@@ -331,6 +340,70 @@ describe('SearchInterface', () => {
     expect(screen.getByTestId('assistant-rich-output')).toBeInTheDocument();
   });
 
+  it('makes actionable next steps clickable and inserts them into the search input', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        answer: [
+          '## Actionable next steps',
+          '1. Pull the latest earnings call transcript.',
+          '2. Compare this quarter against the prior year trends.',
+        ].join('\n'),
+        citations: [],
+      }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Give me follow-ups');
+    await user.click(screen.getByTestId('send-btn'));
+
+    const actionableButton = await screen.findByRole('button', {
+      name: 'Compare this quarter against the prior year trends.',
+    });
+    await user.click(actionableButton);
+
+    expect(screen.getByTestId('message-input')).toHaveValue(
+      'Compare this quarter against the prior year trends.',
+    );
+  });
+
+  it('does not make actionable next steps clickable when they ask for more user info', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        answer: [
+          '## Actionable next steps',
+          '1. Share your budget and timeline.',
+          '2. Provide your preferred destination region.',
+        ].join('\n'),
+        citations: [],
+      }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Plan a trip');
+    await user.click(screen.getByTestId('send-btn'));
+
+    expect(await screen.findByText('Share your budget and timeline.')).toBeInTheDocument();
+    expect(await screen.findByText('Provide your preferred destination region.')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Share your budget and timeline.',
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Provide your preferred destination region.',
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it('renders markdown headings without showing heading markers', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn().mockResolvedValue({
@@ -437,6 +510,37 @@ describe('SearchInterface', () => {
   it('hides PDF export button before any results appear', () => {
     render(<SearchInterface />);
     expect(screen.queryByTestId('pdf-export-btn')).not.toBeInTheDocument();
+  });
+
+  it('compacts the search input and jumps to the top of results after a response is shown', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ answer: 'Result is ready', citations: [] }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const input = screen.getByTestId('message-input');
+    expect(input).toHaveAttribute('rows', '2');
+    expect(input).not.toHaveClass('compact');
+
+    await user.type(input, 'Trigger response');
+    await user.click(screen.getByTestId('send-btn'));
+    expect(await screen.findByText('Result is ready')).toBeInTheDocument();
+
+    const messagesWrap = screen.getByTestId('messages-wrap');
+    messagesWrap.scrollTop = 999;
+    await user.type(screen.getByTestId('message-input'), 'One more');
+    await user.click(screen.getByTestId('send-btn'));
+    expect(await screen.findByText('Result is ready')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('message-input')).toHaveAttribute('rows', '1');
+      expect(screen.getByTestId('message-input')).toHaveClass('compact');
+      expect(messagesWrap.scrollTop).toBe(0);
+    });
   });
 
   it('does not show quick action pills near the composer', () => {

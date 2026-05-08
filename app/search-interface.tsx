@@ -16,7 +16,7 @@ import Link from 'next/link';
 type SearchMode = 'quick' | 'web_search' | 'thinking' | 'deep_research';
 
 const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string }> = [
-  { value: 'quick', label: 'Quick' },
+  { value: 'quick', label: 'Quick Search' },
   { value: 'web_search', label: 'Web Search' },
   { value: 'thinking', label: 'Thinking' },
   { value: 'deep_research', label: 'Deep Research' },
@@ -28,6 +28,30 @@ function detectMobileViewport(): boolean {
     return false;
   }
   return window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches;
+}
+
+function initializeDeviceId(): string {
+  if (typeof window === 'undefined') {
+    return '';
+  }
+
+  try {
+    const storageKey = 'beacon-search-device-id';
+    const existing = window.localStorage.getItem(storageKey);
+    if (existing) {
+      console.log('[UI] Using existing device id', { deviceId: existing });
+      return existing;
+    }
+
+    const generated = `dev-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    window.localStorage.setItem(storageKey, generated);
+    console.log('[UI] Generated new device id', { deviceId: generated });
+    return generated;
+  } catch (error) {
+    const fallback = `dev-fallback-${Math.random().toString(36).slice(2, 10)}`;
+    console.log('[UI] Failed to access localStorage for device id; using fallback', { error, fallback });
+    return fallback;
+  }
 }
 
 type Citation = {
@@ -343,6 +367,19 @@ function parseMarkdownBlocks(text: string): MarkdownBlock[] {
   return blocks;
 }
 
+function isInfoRequestStep(text: string): boolean {
+  const value = text.trim().toLowerCase();
+  if (!value) return false;
+
+  const directInfoRequestPatterns = [
+    /\b(tell me|let me know|share|provide|give|specify|clarify|confirm|upload|paste|attach|send)\b/,
+    /\b(your|you)\b.*\b(details|preferences|budget|location|timeline|constraints|context|goals|requirements)\b/,
+    /\b(what is your|what's your|which one do you|do you prefer)\b/,
+  ];
+
+  return directInfoRequestPatterns.some((pattern) => pattern.test(value));
+}
+
 function isLikelyTextFile(file: File): boolean {
   const mime = (file.type || '').toLowerCase();
   if (mime.startsWith('text/')) return true;
@@ -614,11 +651,11 @@ class UIErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> 
 export default function SearchInterface() {
   const [toast, setToast] = useState('');
   const [isUiBooted, setIsUiBooted] = useState(process.env.NODE_ENV === 'test');
-  const [deviceId, setDeviceId] = useState('');
+  const [deviceId] = useState(initializeDeviceId);
   const [recentsHydrated, setRecentsHydrated] = useState(false);
 
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => !detectMobileViewport());
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null);
@@ -634,11 +671,14 @@ export default function SearchInterface() {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedContextFile[]>([]);
   const [gitSnippets, setGitSnippets] = useState<GitCodeContext[]>([]);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [toolsMenuType, setToolsMenuType] = useState<'add' | 'preferences'>('add');
   const [searchMode, setSearchMode] = useState<SearchMode>('quick');
   const [welcomeSuggestions, setWelcomeSuggestions] = useState<string[]>(FALLBACK_WELCOME_SUGGESTIONS);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const previousSearchingRef = useRef(false);
   const messageWrapRef = useRef<HTMLDivElement>(null);
+  const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
 
@@ -681,8 +721,6 @@ export default function SearchInterface() {
 
     const mediaQuery = window.matchMedia(MOBILE_BREAKPOINT_QUERY);
     let wasMobile = mediaQuery.matches;
-    setIsMobileViewport(mediaQuery.matches);
-    setSidebarOpen(!mediaQuery.matches);
     if (mediaQuery.matches) {
       console.log('[UI] Mobile viewport detected');
     }
@@ -702,27 +740,6 @@ export default function SearchInterface() {
 
     mediaQuery.addEventListener('change', onViewportChange);
     return () => mediaQuery.removeEventListener('change', onViewportChange);
-  }, []);
-
-  useEffect(() => {
-    try {
-      const storageKey = 'beacon-search-device-id';
-      const existing = window.localStorage.getItem(storageKey);
-      if (existing) {
-        console.log('[UI] Using existing device id', { deviceId: existing });
-        setDeviceId(existing);
-        return;
-      }
-
-      const generated = `dev-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      window.localStorage.setItem(storageKey, generated);
-      console.log('[UI] Generated new device id', { deviceId: generated });
-      setDeviceId(generated);
-    } catch (error) {
-      const fallback = `dev-fallback-${Math.random().toString(36).slice(2, 10)}`;
-      console.log('[UI] Failed to access localStorage for device id; using fallback', { error, fallback });
-      setDeviceId(fallback);
-    }
   }, []);
 
   useEffect(() => {
@@ -865,9 +882,13 @@ export default function SearchInterface() {
   }, [toast]);
 
   useEffect(() => {
-    if (!messageWrapRef.current) return;
-    messageWrapRef.current.scrollTop = messageWrapRef.current.scrollHeight;
-  }, [conversations, isLoading, searching]);
+    const justFinishedSearching = previousSearchingRef.current && !searching;
+    previousSearchingRef.current = searching;
+    if (!messageWrapRef.current || !hasResults) return;
+    if (!justFinishedSearching) return;
+    messageWrapRef.current.scrollTop = 0;
+    console.log('[UI] Response shown; scrolled messages to top');
+  }, [searching, hasResults]);
 
   useEffect(() => {
     if (!toolsMenuOpen) return;
@@ -1158,126 +1179,188 @@ export default function SearchInterface() {
     console.log('[UI] Added git snippet context', { label, length: code.length });
   }
 
-  function showMoreRouteInfo() {
-    const route = window.location.pathname || '/';
-    const turns = activeConversation?.turns.length ?? 0;
-    const details = `Route: ${route} · Turns: ${turns} · Mode: ${getModeLabel(searchMode)}`;
-    console.log('[UI] More Route Info requested', { route, turns, mode: searchMode });
-    showToast(details);
+  function showAddMenu() {
+    setToolsMenuType('add');
+    setToolsMenuOpen((prev) => (toolsMenuType === 'add' ? !prev : true));
+  }
+
+  function showPreferencesMenu() {
+    setToolsMenuType('preferences');
+    setToolsMenuOpen((prev) => (toolsMenuType === 'preferences' ? !prev : true));
+  }
+
+  function insertActionableNextStep(step: string) {
+    const nextInput = step.trim();
+    if (!nextInput) return;
+    console.log('[UI] Actionable next step selected', { step: nextInput });
+    setInput(nextInput);
+    messageInputRef.current?.focus();
   }
 
   function renderStructuredAssistantText(text: string) {
     if (!text) return null;
     const blocks = parseMarkdownBlocks(text);
+    const renderedBlocks: ReactNode[] = [];
+    let actionableStepsActive = false;
+
+    blocks.forEach((block, index) => {
+      if (block.type === 'heading') {
+        const content = parseInlineMarkdown(block.text, `h-${index}`);
+        actionableStepsActive = block.text.trim().toLowerCase().includes('actionable next steps');
+        if (block.level === 1) {
+          renderedBlocks.push(<h1 key={`h-${index}`}>{content}</h1>);
+          return;
+        }
+        if (block.level === 2) {
+          renderedBlocks.push(<h2 key={`h-${index}`}>{content}</h2>);
+          return;
+        }
+        if (block.level === 3) {
+          renderedBlocks.push(<h3 key={`h-${index}`}>{content}</h3>);
+          return;
+        }
+        if (block.level === 4) {
+          renderedBlocks.push(<h4 key={`h-${index}`}>{content}</h4>);
+          return;
+        }
+        if (block.level === 5) {
+          renderedBlocks.push(<h5 key={`h-${index}`}>{content}</h5>);
+          return;
+        }
+        renderedBlocks.push(<h6 key={`h-${index}`}>{content}</h6>);
+        return;
+      }
+
+      if (block.type === 'ul') {
+        renderedBlocks.push(
+          <ul className="ai-list ai-list-ul" key={`ul-${index}`}>
+            {block.items.map((item, itemIndex) => (
+              <li key={`ul-${index}-${itemIndex}`}>
+                {item.match(/^\[( |x|X)\]\s+(.+)$/) ? (
+                  <>
+                    <input type="checkbox" disabled checked={Boolean(item.match(/^\[(x|X)\]\s+/))} readOnly />
+                    <span>{parseInlineMarkdown(item.replace(/^\[( |x|X)\]\s+/, ''), `ul-${index}-${itemIndex}`)}</span>
+                  </>
+                ) : actionableStepsActive ? (
+                  isInfoRequestStep(item) ? (
+                    parseInlineMarkdown(item, `ul-${index}-${itemIndex}`)
+                  ) : (
+                    <button
+                      type="button"
+                      className="actionable-step-btn"
+                      data-testid={`actionable-next-step-${itemIndex}`}
+                      onClick={() => insertActionableNextStep(item)}
+                    >
+                      {parseInlineMarkdown(item, `ul-${index}-${itemIndex}`)}
+                    </button>
+                  )
+                ) : (
+                  parseInlineMarkdown(item, `ul-${index}-${itemIndex}`)
+                )}
+              </li>
+            ))}
+          </ul>,
+        );
+        return;
+      }
+
+      if (block.type === 'ol') {
+        renderedBlocks.push(
+          <ol className="ai-list ai-list-ol" key={`ol-${index}`}>
+            {block.items.map((item, itemIndex) => (
+              <li key={`ol-${index}-${itemIndex}`}>
+                {actionableStepsActive ? (
+                  isInfoRequestStep(item) ? (
+                    parseInlineMarkdown(item, `ol-${index}-${itemIndex}`)
+                  ) : (
+                    <button
+                      type="button"
+                      className="actionable-step-btn"
+                      data-testid={`actionable-next-step-${itemIndex}`}
+                      onClick={() => insertActionableNextStep(item)}
+                    >
+                      {parseInlineMarkdown(item, `ol-${index}-${itemIndex}`)}
+                    </button>
+                  )
+                ) : (
+                  parseInlineMarkdown(item, `ol-${index}-${itemIndex}`)
+                )}
+              </li>
+            ))}
+          </ol>,
+        );
+        return;
+      }
+
+      actionableStepsActive = false;
+
+      if (block.type === 'code') {
+        renderedBlocks.push(
+          <pre className="ai-code-block" key={`code-${index}`}>
+            <code data-language={block.language || undefined}>{block.code}</code>
+          </pre>,
+        );
+        return;
+      }
+
+      if (block.type === 'blockquote') {
+        renderedBlocks.push(
+          <blockquote className="ai-blockquote" key={`quote-${index}`}>
+            {block.text.split('\n').map((quoteLine, quoteLineIndex) => (
+              <p key={`quote-${index}-${quoteLineIndex}`}>
+                {parseInlineMarkdown(quoteLine, `quote-${index}-${quoteLineIndex}`)}
+              </p>
+            ))}
+          </blockquote>,
+        );
+        return;
+      }
+
+      if (block.type === 'hr') {
+        renderedBlocks.push(<hr className="ai-hr" key={`hr-${index}`} />);
+        return;
+      }
+
+      if (block.type === 'table') {
+        renderedBlocks.push(
+          <div className="ai-table-wrap" key={`table-${index}`}>
+            <table className="ai-table">
+              <thead>
+                <tr>
+                  {block.headers.map((header, headerIndex) => (
+                    <th key={`table-${index}-h-${headerIndex}`}>
+                      {parseInlineMarkdown(header, `table-${index}-h-${headerIndex}`)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {block.rows.map((row, rowIndex) => (
+                  <tr key={`table-${index}-r-${rowIndex}`}>
+                    {row.map((cell, cellIndex) => (
+                      <td key={`table-${index}-r-${rowIndex}-c-${cellIndex}`}>
+                        {parseInlineMarkdown(cell, `table-${index}-r-${rowIndex}-c-${cellIndex}`)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>,
+        );
+        return;
+      }
+
+      renderedBlocks.push(
+        <p className="ai-paragraph" key={`p-${index}`}>
+          {parseInlineMarkdown(block.text, `p-${index}`)}
+        </p>,
+      );
+    });
 
     return (
       <div className="ai-rich" data-testid="assistant-rich-output">
-        {blocks.map((block, index) => {
-          if (block.type === 'heading') {
-            const content = parseInlineMarkdown(block.text, `h-${index}`);
-            if (block.level === 1) return <h1 key={`h-${index}`}>{content}</h1>;
-            if (block.level === 2) return <h2 key={`h-${index}`}>{content}</h2>;
-            if (block.level === 3) return <h3 key={`h-${index}`}>{content}</h3>;
-            if (block.level === 4) return <h4 key={`h-${index}`}>{content}</h4>;
-            if (block.level === 5) return <h5 key={`h-${index}`}>{content}</h5>;
-            return <h6 key={`h-${index}`}>{content}</h6>;
-          }
-
-          if (block.type === 'ul') {
-            return (
-              <ul className="ai-list ai-list-ul" key={`ul-${index}`}>
-                {block.items.map((item, itemIndex) => (
-                  <li key={`ul-${index}-${itemIndex}`}>
-                    {item.match(/^\[( |x|X)\]\s+(.+)$/) ? (
-                      <>
-                        <input
-                          type="checkbox"
-                          disabled
-                          checked={Boolean(item.match(/^\[(x|X)\]\s+/))}
-                          readOnly
-                        />
-                        <span>{parseInlineMarkdown(item.replace(/^\[( |x|X)\]\s+/, ''), `ul-${index}-${itemIndex}`)}</span>
-                      </>
-                    ) : (
-                      parseInlineMarkdown(item, `ul-${index}-${itemIndex}`)
-                    )}
-                  </li>
-                ))}
-              </ul>
-            );
-          }
-
-          if (block.type === 'ol') {
-            return (
-              <ol className="ai-list ai-list-ol" key={`ol-${index}`}>
-                {block.items.map((item, itemIndex) => (
-                  <li key={`ol-${index}-${itemIndex}`}>
-                    {parseInlineMarkdown(item, `ol-${index}-${itemIndex}`)}
-                  </li>
-                ))}
-              </ol>
-            );
-          }
-
-          if (block.type === 'code') {
-            return (
-              <pre className="ai-code-block" key={`code-${index}`}>
-                <code data-language={block.language || undefined}>{block.code}</code>
-              </pre>
-            );
-          }
-
-          if (block.type === 'blockquote') {
-            return (
-              <blockquote className="ai-blockquote" key={`quote-${index}`}>
-                {block.text.split('\n').map((quoteLine, quoteLineIndex) => (
-                  <p key={`quote-${index}-${quoteLineIndex}`}>
-                    {parseInlineMarkdown(quoteLine, `quote-${index}-${quoteLineIndex}`)}
-                  </p>
-                ))}
-              </blockquote>
-            );
-          }
-
-          if (block.type === 'hr') {
-            return <hr className="ai-hr" key={`hr-${index}`} />;
-          }
-
-          if (block.type === 'table') {
-            return (
-              <div className="ai-table-wrap" key={`table-${index}`}>
-                <table className="ai-table">
-                  <thead>
-                    <tr>
-                      {block.headers.map((header, headerIndex) => (
-                        <th key={`table-${index}-h-${headerIndex}`}>
-                          {parseInlineMarkdown(header, `table-${index}-h-${headerIndex}`)}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {block.rows.map((row, rowIndex) => (
-                      <tr key={`table-${index}-r-${rowIndex}`}>
-                        {row.map((cell, cellIndex) => (
-                          <td key={`table-${index}-r-${rowIndex}-c-${cellIndex}`}>
-                            {parseInlineMarkdown(cell, `table-${index}-r-${rowIndex}-c-${cellIndex}`)}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            );
-          }
-
-          return (
-            <p className="ai-paragraph" key={`p-${index}`}>
-              {parseInlineMarkdown(block.text, `p-${index}`)}
-            </p>
-          );
-        })}
+        {renderedBlocks}
       </div>
     );
   }
@@ -1791,11 +1874,25 @@ export default function SearchInterface() {
                           ) : null}
 
                           <div className="action-bar">
-                            <button type="button" className="action-btn" onClick={copyLastAssistant}>
-                              Copy
+                            <button
+                              type="button"
+                              className="action-btn action-icon-btn"
+                              data-testid="copy-response-btn"
+                              onClick={copyLastAssistant}
+                              aria-label="Copy response"
+                              title="Copy response"
+                            >
+                              <span aria-hidden="true">⧉</span>
                             </button>
-                            <button type="button" className="action-btn" onClick={regenerate}>
-                              Regenerate
+                            <button
+                              type="button"
+                              className="action-btn action-icon-btn"
+                              data-testid="regenerate-response-btn"
+                              onClick={regenerate}
+                              aria-label="Regenerate response"
+                              title="Regenerate response"
+                            >
+                              <span aria-hidden="true">↻</span>
                             </button>
                           </div>
                         </div>
@@ -1851,10 +1948,12 @@ export default function SearchInterface() {
 
                 <textarea
                   id="message-input"
+                  ref={messageInputRef}
                   data-testid="message-input"
+                  className={hasResults ? 'compact' : ''}
                   value={input}
                   placeholder="Ask anything..."
-                  rows={2}
+                  rows={hasResults ? 1 : 2}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' && !event.shiftKey) {
@@ -1868,72 +1967,86 @@ export default function SearchInterface() {
                   <div className="tools-menu-wrap" ref={toolsMenuRef}>
                     <button
                       type="button"
-                      className="tool-dropdown-btn"
-                      data-testid="tools-dropdown-btn"
+                      className="tool-circle-btn"
+                      data-testid="tools-add-btn"
+                      aria-label="Open add menu"
+                      title="Add"
                       aria-haspopup="menu"
                       aria-expanded={toolsMenuOpen}
-                      onClick={() => setToolsMenuOpen((prev) => !prev)}
+                      onClick={showAddMenu}
                     >
                       <span className="plus-glyph" aria-hidden="true">
                         +
                       </span>
                     </button>
+                    <button
+                      type="button"
+                      className="tool-circle-btn"
+                      data-testid="tools-preferences-btn"
+                      aria-label="Open preferences menu"
+                      title="Preferences"
+                      aria-haspopup="menu"
+                      aria-expanded={toolsMenuOpen}
+                      onClick={showPreferencesMenu}
+                    >
+                      <span className="prefs-glyph" aria-hidden="true">
+                        <span className="prefs-line prefs-line-top" />
+                        <span className="prefs-line prefs-line-bottom" />
+                      </span>
+                    </button>
+                    <span className="composer-mode-label" data-testid="composer-mode-label">
+                      {getModeLabel(searchMode)}
+                    </span>
                     {toolsMenuOpen ? (
                       <div className="tool-dropdown-menu" data-testid="tools-dropdown-menu" role="menu">
-                        {SEARCH_MODE_OPTIONS.map((option) => (
-                          <button
-                            key={option.value}
-                            type="button"
-                            className={`tool-dropdown-item ${searchMode === option.value ? 'active' : ''}`}
-                            data-testid={`search-mode-option-${option.value}`}
-                            onClick={() => {
-                              console.log('[UI] Search mode changed', { mode: option.value });
-                              setSearchMode(option.value);
-                              setToolsMenuOpen(false);
-                            }}
-                          >
-                            {option.label}
-                          </button>
-                        ))}
-                        <button
-                          type="button"
-                          className="tool-dropdown-item"
-                          data-testid="upload-files-btn"
-                          onClick={() => {
-                            fileInputRef.current?.click();
-                            setToolsMenuOpen(false);
-                          }}
-                        >
-                          Upload file
-                        </button>
-                        <button
-                          type="button"
-                          className="tool-dropdown-item"
-                          data-testid="add-git-code-btn"
-                          onClick={() => {
-                            addGitSnippetContext();
-                            setToolsMenuOpen(false);
-                          }}
-                        >
-                          Add git code
-                        </button>
-                        <button
-                          type="button"
-                          className="tool-dropdown-item"
-                          data-testid="more-route-info-btn"
-                          onClick={() => {
-                            showMoreRouteInfo();
-                            setToolsMenuOpen(false);
-                          }}
-                        >
-                          More Route Info
-                        </button>
+                        {toolsMenuType === 'preferences'
+                          ? SEARCH_MODE_OPTIONS.map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                className={`tool-dropdown-item ${searchMode === option.value ? 'active' : ''}`}
+                                data-testid={`search-mode-option-${option.value}`}
+                                onClick={() => {
+                                  console.log('[UI] Search mode changed', { mode: option.value });
+                                  setSearchMode(option.value);
+                                  setToolsMenuOpen(false);
+                                }}
+                              >
+                                {option.label}
+                              </button>
+                            ))
+                          : null}
+                        {toolsMenuType === 'add' ? (
+                          <>
+                            <button
+                              type="button"
+                              className="tool-dropdown-item"
+                              data-testid="upload-files-btn"
+                              onClick={() => {
+                                fileInputRef.current?.click();
+                                setToolsMenuOpen(false);
+                              }}
+                            >
+                              Upload file
+                            </button>
+                            <button
+                              type="button"
+                              className="tool-dropdown-item"
+                              data-testid="add-git-code-btn"
+                              onClick={() => {
+                                addGitSnippetContext();
+                                setToolsMenuOpen(false);
+                              }}
+                            >
+                              Add git code
+                            </button>
+                          </>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
 
                   <div id="input-right">
-                    <span id="char-count">{input.length > 200 ? input.length.toLocaleString() : ''}</span>
                     <button
                       id="send-btn"
                       data-testid="send-btn"
@@ -1942,19 +2055,10 @@ export default function SearchInterface() {
                       className={isLoading ? 'loading' : ''}
                       onClick={() => void sendMessage()}
                     >
-                      {isLoading ? (
-                        '■'
-                      ) : (
-                        <span className="send-glyph" aria-hidden="true">
-                          ↑
-                        </span>
-                      )}
+                      {isLoading ? '■' : <span className="send-glyph" aria-hidden="true">↑</span>}
                     </button>
                   </div>
                 </div>
-              </div>
-              <div id="footer-note">
-                <span id="mode-label">{getModeLabel(searchMode)}</span>
               </div>
               <p className="subheader-copy text-xs text-zinc-400 text-center mt-2">
                 AI models can make mistakes. Always double check your work. Remember to think critically.
@@ -2320,6 +2424,16 @@ export default function SearchInterface() {
         .action-bar { margin-top: 8px; display: flex; gap: 6px; }
         .action-btn { border: none; color: var(--text-tertiary); background: transparent; padding: 4px 8px; border-radius: var(--radius-sm); }
         .action-btn:hover { background: #f3f4f6; color: var(--text-secondary); }
+        .action-icon-btn {
+          min-width: 38px;
+          width: 38px;
+          height: 38px;
+          padding: 0;
+          font-size: 20px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
         .error-bubble { background: #fff3f3; border: 1px solid #f7cccc; border-radius: var(--radius-md); padding: 10px 12px; color: #c53030; }
 
         #input-area {
@@ -2398,16 +2512,44 @@ export default function SearchInterface() {
           word-break: break-word;
           overflow-x: hidden;
         }
+        #message-input.compact {
+          min-height: 38px;
+          max-height: 38px;
+          line-height: 1.35;
+          padding-top: 8px;
+          padding-bottom: 8px;
+        }
         #message-input::placeholder { color: #9ca3af; font-size: 15px; font-weight: 600; }
+        .actionable-step-btn {
+          border: 1px solid #d1d5db;
+          background: #f8fafc;
+          color: #0f172a;
+          border-radius: 10px;
+          padding: 6px 10px;
+          text-align: left;
+          width: fit-content;
+          max-width: 100%;
+        }
+        .actionable-step-btn:hover {
+          background: #eef2ff;
+          border-color: #c7d2fe;
+        }
         #input-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 0; }
-        .tools-menu-wrap { position: relative; }
-        .tool-dropdown-btn {
+        .tools-menu-wrap { position: relative; display: inline-flex; align-items: center; gap: 10px; }
+        .composer-mode-label {
+          font-size: 15px;
+          color: #374151;
+          line-height: 1;
+          margin-left: 2px;
+          user-select: none;
+        }
+        .tool-circle-btn {
           border: 1px solid #ececec;
-          background: #f4f4f4;
+          background: #ffffff;
           color: #0f172a;
           border-radius: 999px;
-          width: 34px;
-          height: 34px;
+          width: 32px;
+          height: 32px;
           justify-content: center;
           padding: 0;
           display: inline-flex;
@@ -2421,13 +2563,43 @@ export default function SearchInterface() {
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 24px;
+          font-size: 22px;
           line-height: 1;
-          font-weight: 400;
+          font-weight: 300;
           transform: translateY(-1px);
           pointer-events: none;
         }
-        .tool-dropdown-btn:hover { background: #efefef; border-color: #dbdbdb; }
+        .tool-circle-btn:hover { background: #f8fafc; border-color: #d6d6d6; }
+        .prefs-glyph {
+          width: 16px;
+          height: 12px;
+          position: relative;
+          display: inline-block;
+        }
+        .prefs-line {
+          position: absolute;
+          left: 0;
+          right: 0;
+          height: 2px;
+          background: #1f2937;
+          border-radius: 999px;
+        }
+        .prefs-line-top { top: 2px; }
+        .prefs-line-bottom { bottom: 2px; }
+        .prefs-line-top::before,
+        .prefs-line-bottom::after {
+          content: '';
+          position: absolute;
+          width: 5px;
+          height: 5px;
+          border: 2px solid #1f2937;
+          border-radius: 50%;
+          background: #ffffff;
+          top: 50%;
+          transform: translateY(-50%);
+        }
+        .prefs-line-top::before { left: -1px; }
+        .prefs-line-bottom::after { right: -1px; }
         .tool-dropdown-menu {
           position: absolute;
           left: 0;
@@ -2459,14 +2631,13 @@ export default function SearchInterface() {
           font-weight: 600;
         }
         #input-right { display: flex; align-items: center; gap: 8px; }
-        #char-count { font-size: 11px; color: var(--text-tertiary); }
         #send-btn {
-          width: 34px;
-          height: 34px;
+          width: 32px;
+          height: 32px;
           border-radius: 50%;
           border: none;
-          background: var(--send-bg);
-          color: var(--send-color);
+          background: #eef6ff;
+          color: #0f172a;
           font-size: 16px;
           display: inline-flex;
           align-items: center;
@@ -2477,15 +2648,13 @@ export default function SearchInterface() {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          font-size: 22px;
+          font-size: 15px;
           line-height: 1;
-          font-weight: 700;
-          transform: translateY(-1px);
+          font-weight: 600;
           pointer-events: none;
         }
-        #send-btn:hover { background: #000000; }
+        #send-btn:hover { background: #dceeff; }
         #send-btn:disabled { background: #e5e7eb; color: #9ca3af; cursor: not-allowed; }
-        #footer-note { max-width: 760px; margin: 10px auto 0; font-size: 12px; color: var(--text-tertiary); text-align: center; }
         .subheader-copy { padding-top: 25px; }
 
         #toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: #111827; border: 1px solid #111827; border-radius: var(--radius-md); padding: 9px 18px; font-size: 13px; color: #ffffff; z-index: 200; opacity: 0; transition: opacity .25s; pointer-events: none; box-shadow: 0 10px 24px rgba(15,23,42,0.2); }
@@ -2542,7 +2711,16 @@ export default function SearchInterface() {
           .ai-text { font-size: 15px; line-height: 1.62; }
           .citations { gap: 7px; }
           .cite-item { padding: 10px; }
-          .tool-dropdown-btn { max-width: 100%; }
+          .tool-circle-btn { width: 30px; height: 30px; }
+          .plus-glyph { font-size: 20px; transform: translateY(-1px); }
+          .composer-mode-label { font-size: 15px; }
+          .prefs-glyph { width: 14px; height: 10px; }
+          .prefs-line-top::before,
+          .prefs-line-bottom::after {
+            width: 4px;
+            height: 4px;
+          }
+          #send-btn { width: 30px; height: 30px; }
           .tool-dropdown-menu { left: 0; right: auto; min-width: min(220px, calc(100vw - 30px)); }
           #input-footer { gap: 8px; }
           #welcome h1 { font-size: 30px; text-align: center; }
