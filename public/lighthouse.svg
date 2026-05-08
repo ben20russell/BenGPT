@@ -1,36 +1,40 @@
 <svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">Beacon Search Neon Lighthouse</title>
-  <desc id="desc">Neon cyan line-art lighthouse on a dark blue background.</desc>
-  <defs>
-    <radialGradient id="bg" cx="50%" cy="30%" r="80%">
-      <stop offset="0%" stop-color="#123c50"/>
-      <stop offset="55%" stop-color="#0b2535"/>
-      <stop offset="100%" stop-color="#071827"/>
-    </radialGradient>
-  </defs>
+  <title id="title">Beacon Search Lighthouse</title>
+  <desc id="desc">Light mode lighthouse icon inspired by modern flat illustration style.</desc>
+  <rect width="512" height="512" rx="110" fill="#eef7ff"/>
 
-  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
-
-  <g stroke="#65f7ff" stroke-width="10" stroke-linecap="square" stroke-linejoin="miter" fill="none">
-    <path d="M205 116L256 72L307 116"/>
-    <path d="M197 126H315"/>
-    <path d="M208 140V188"/>
-    <path d="M304 140V188"/>
-
-    <rect x="224" y="146" width="64" height="52"/>
-    <path d="M224 146L288 198"/>
-    <path d="M288 146L224 198"/>
-
-    <path d="M192 214H320V244L308 258H204L192 244Z"/>
-
-    <path d="M210 258L194 424"/>
-    <path d="M238 258L226 424"/>
-    <path d="M302 258L318 424"/>
-    <path d="M274 258L286 424"/>
-
-    <path d="M174 424L338 310V452H174Z"/>
-    <path d="M174 366L338 252"/>
-
-    <path d="M164 452H350"/>
+  <g opacity="0.95">
+    <circle cx="104" cy="162" r="44" fill="#72d2f3"/>
+    <circle cx="156" cy="140" r="40" fill="#72d2f3"/>
+    <circle cx="204" cy="156" r="46" fill="#72d2f3"/>
+    <rect x="68" y="162" width="180" height="44" fill="#72d2f3"/>
   </g>
+
+  <g opacity="0.95">
+    <circle cx="346" cy="272" r="42" fill="#72d2f3"/>
+    <circle cx="396" cy="252" r="40" fill="#72d2f3"/>
+    <circle cx="440" cy="270" r="44" fill="#72d2f3"/>
+    <rect x="310" y="272" width="166" height="40" fill="#72d2f3"/>
+  </g>
+
+  <rect x="208" y="104" width="96" height="42" fill="#00a4d8"/>
+  <rect x="186" y="144" width="140" height="38" rx="6" fill="#f15b4c"/>
+  <rect x="212" y="182" width="88" height="36" fill="#ffffff"/>
+  <polygon points="198,182 314,182 294,216 218,216" fill="#f4f7fb"/>
+
+  <polygon points="206,216 304,216 324,450 188,450" fill="#ffffff"/>
+  <polygon points="188,284 304,262 312,324 196,346" fill="#f15b4c"/>
+  <polygon points="196,346 312,324 318,380 202,402" fill="#ffffff"/>
+  <polygon points="202,402 318,380 324,438 208,458" fill="#f15b4c"/>
+
+  <rect x="214" y="156" width="16" height="24" fill="#ffffff"/>
+  <rect x="242" y="156" width="16" height="24" fill="#ffffff"/>
+  <rect x="270" y="156" width="16" height="24" fill="#ffffff"/>
+
+  <rect x="250" y="116" width="12" height="20" fill="#ffffff"/>
+  <rect x="280" y="106" width="12" height="20" fill="#f15b4c"/>
+
+  <polygon points="182,450 330,450 350,496 162,496" fill="#9ea3a8"/>
+  <polygon points="92,460 182,450 162,496 70,496" fill="#8e9398"/>
+  <polygon points="330,450 420,460 442,496 350,496" fill="#8e9398"/>
 </svg>
