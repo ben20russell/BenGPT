@@ -618,7 +618,7 @@ export default function SearchInterface() {
   const [recentsHydrated, setRecentsHydrated] = useState(false);
 
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
-  const [sidebarOpen, setSidebarOpen] = useState(() => !detectMobileViewport());
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null);
@@ -681,6 +681,8 @@ export default function SearchInterface() {
 
     const mediaQuery = window.matchMedia(MOBILE_BREAKPOINT_QUERY);
     let wasMobile = mediaQuery.matches;
+    setIsMobileViewport(mediaQuery.matches);
+    setSidebarOpen(!mediaQuery.matches);
     if (mediaQuery.matches) {
       console.log('[UI] Mobile viewport detected');
     }
