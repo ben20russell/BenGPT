@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { appendFile, readFile } from "node:fs/promises";
+import path from "node:path";
 import { AzureOpenAI } from "openai";
 import { toUserFacingChatError } from "./error-mapper";
 
@@ -6,7 +8,7 @@ type SearchContextSize = "low" | "medium" | "high";
 type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 type TextVerbosity = "low" | "medium" | "high";
 
-type SearchMode = "quick" | "web_search" | "thinking" | "deep_research";
+type SearchMode = "web_search" | "thinking" | "deep_research";
 
 type UploadContextFile = {
   name?: string;
@@ -33,6 +35,7 @@ type ChatRequestBody = {
   query?: string;
   message?: string;
   mode?: SearchMode;
+  useMemory?: boolean;
   files?: UploadContextFile[];
   links?: string[];
   gitSnippets?: GitSnippetContext[];
@@ -114,21 +117,6 @@ type SearchPreset = {
 };
 
 const SEARCH_PRESETS: Record<SearchMode, SearchPreset> = {
-  quick: {
-    tools: [
-      {
-        type: "web_search",
-        search_context_size: "low",
-      },
-    ],
-    tool_choice: "auto",
-    reasoning: {
-      effort: "low",
-    },
-    text: {
-      verbosity: "low",
-    },
-  },
   web_search: {
     tools: [
       {
@@ -194,11 +182,120 @@ const RESPONSE_FORMAT_INSTRUCTIONS = [
   "- Keep headings exactly as written above.",
 ].join("\n");
 
+const DEFAULT_USE_MEMORY = true;
+const MEMORY_HEADER = "--- MEMORY: CONTEXT FROM PAST SEARCHES ---";
+const MEMORY_FILE_CANDIDATES = [
+  path.resolve(process.cwd(), "AI_memory.txt"),
+  path.resolve(process.cwd(), "..", "AI_memory.txt"),
+];
+
+function resolveUseMemory(raw: unknown): boolean {
+  return typeof raw === "boolean" ? raw : DEFAULT_USE_MEMORY;
+}
+
+async function buildInstructionsWithOptionalMemory(useMemory: boolean): Promise<string> {
+  if (!useMemory) {
+    console.log("[/api/chat] Memory disabled for this request.");
+    return RESPONSE_FORMAT_INSTRUCTIONS;
+  }
+
+  for (const memoryPath of MEMORY_FILE_CANDIDATES) {
+    try {
+      const memoryText = (await readFile(memoryPath, "utf8")).trim();
+
+      if (!memoryText) {
+        console.log("[/api/chat] Memory file found but empty", { memoryPath });
+        continue;
+      }
+
+      console.log("[/api/chat] Memory loaded and appended to instructions", {
+        memoryPath,
+        chars: memoryText.length,
+      });
+
+      return [
+        RESPONSE_FORMAT_INSTRUCTIONS,
+        "",
+        MEMORY_HEADER,
+        "Use this memory to understand the user's preferences and prior context, while prioritizing the user's current question.",
+        memoryText,
+      ].join("\n");
+    } catch (error) {
+      console.log("[/api/chat] Memory read attempt failed", { memoryPath, error });
+    }
+  }
+
+  console.log("[/api/chat] Memory enabled but no readable AI_memory.txt found.");
+  return RESPONSE_FORMAT_INSTRUCTIONS;
+}
+
+async function getMemoryWritePath(): Promise<string> {
+  for (const memoryPath of MEMORY_FILE_CANDIDATES) {
+    try {
+      await readFile(memoryPath, "utf8");
+      return memoryPath;
+    } catch (_error) {
+      // Intentionally continue through candidates until one exists.
+    }
+  }
+  return MEMORY_FILE_CANDIDATES[0];
+}
+
+function sanitizeMemoryLine(input: string): string {
+  return input.replace(/\s+/g, " ").trim();
+}
+
+async function appendSearchToMemory(input: {
+  searchMode: SearchMode;
+  queryText: string;
+  answerText: string;
+}): Promise<void> {
+  const { searchMode, queryText, answerText } = input;
+  const memoryPath = await getMemoryWritePath();
+  const timestamp = new Date().toISOString();
+  const querySummary = sanitizeMemoryLine(queryText).slice(0, 700);
+  const answerSummary = sanitizeMemoryLine(answerText).slice(0, 1400);
+
+  if (!querySummary || !answerSummary) {
+    console.log("[/api/chat] Skipping memory append due to missing summary text", {
+      hasQuery: Boolean(querySummary),
+      hasAnswer: Boolean(answerSummary),
+    });
+    return;
+  }
+
+  const entry = [
+    "",
+    `--- SEARCH MEMORY ENTRY | ${timestamp} ---`,
+    `Mode: ${searchMode}`,
+    `User search: ${querySummary}`,
+    `Assistant answer: ${answerSummary}`,
+  ].join("\n");
+
+  try {
+    await appendFile(memoryPath, entry, "utf8");
+    console.log("[/api/chat] Search appended to memory", {
+      memoryPath,
+      queryChars: querySummary.length,
+      answerChars: answerSummary.length,
+      searchMode,
+    });
+  } catch (error) {
+    console.log("[/api/chat] Failed to append search to memory", {
+      memoryPath,
+      error,
+    });
+  }
+}
+
 function parseSearchMode(rawMode: unknown): SearchMode {
   if (rawMode === "quick" || rawMode === "web_search" || rawMode === "thinking" || rawMode === "deep_research") {
+    if (rawMode === "quick") {
+      return "web_search";
+    }
     return rawMode;
   }
-  return "quick";
+  return "web_search";
 }
 
 function normalizeAzureEndpoint(raw: string | undefined): string | undefined {
@@ -240,6 +337,7 @@ export async function POST(req: NextRequest) {
     const gitSnippets = Array.isArray(body.gitSnippets) ? body.gitSnippets : [];
     const history = Array.isArray(body.history) ? body.history : [];
     const searchMode = parseSearchMode(body.mode);
+    const useMemory = resolveUseMemory(body.useMemory);
 
     if (!text && files.length === 0 && links.length === 0 && gitSnippets.length === 0) {
       console.log("[/api/chat] Validation failed: missing message");
@@ -276,6 +374,7 @@ export async function POST(req: NextRequest) {
       linkCount: links.length,
       gitSnippetCount: gitSnippets.length,
       historyTurnCount: history.length,
+      useMemory,
     });
 
     const client = new AzureOpenAI({
@@ -355,9 +454,10 @@ export async function POST(req: NextRequest) {
     };
 
     const preset = SEARCH_PRESETS[searchMode];
+    const instructions = await buildInstructionsWithOptionalMemory(useMemory);
     const baseRequest: ChatResponsesRequest = {
       model: config.deployment,
-      instructions: RESPONSE_FORMAT_INSTRUCTIONS,
+      instructions,
       tools: preset.tools,
       tool_choice: preset.tool_choice,
       reasoning: preset.reasoning,
@@ -392,7 +492,7 @@ export async function POST(req: NextRequest) {
 
       const fallbackRequest: ChatResponsesRequest = {
         model: config.deployment,
-        instructions: RESPONSE_FORMAT_INSTRUCTIONS,
+        instructions,
         input: [inputMessage],
       };
       if (preset.tools && searchMode !== "thinking") {
@@ -412,6 +512,14 @@ export async function POST(req: NextRequest) {
       hasAnswer: Boolean(response.output_text),
       citationCount: citations.length,
     });
+
+    if (text && response.output_text) {
+      await appendSearchToMemory({
+        searchMode,
+        queryText: text,
+        answerText: response.output_text,
+      });
+    }
 
     return NextResponse.json({
       answer: response.output_text ?? "",

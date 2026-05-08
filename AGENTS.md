@@ -55,7 +55,8 @@
   - Start or confirm dev server with `npm run dev`.
   - Use this fixed localhost URL: `http://127.0.0.1:3011/`.
   - Verify a listener exists on this port (example: `lsof -nP -iTCP:3011 -sTCP:LISTEN`).
-  - Always provide a **Web Preview** entry in the completion update using the running localhost URL.
-  - Always share this exact localhost URL in the completion message.
+  - Always provide a **Web Preview** entry in every completion update using the running localhost URL.
+  - Always share this exact localhost URL (`http://127.0.0.1:3011/`) in every completion message after every update.
+  - Never finish an update without including a working localhost link.
   - If `3011` is unavailable, free the port and restart so `http://127.0.0.1:3011/` is active.
 - If you encounter the runtime/tooling error `stream disconnected before completion: response.failed event received`, continue the task and retry or proceed with the next safe step instead of stopping.

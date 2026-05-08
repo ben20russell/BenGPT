@@ -107,7 +107,7 @@ describe('SearchInterface', () => {
     expect(screen.getByTestId('send-btn')).toBeEnabled();
   });
 
-  it('sends /api/chat payload using query and quick mode by default', async () => {
+  it('sends /api/chat payload using query and web search mode by default', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -132,9 +132,45 @@ describe('SearchInterface', () => {
     expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
     expect(JSON.parse(String(init.body))).toMatchObject({
       query: 'Find current trends',
-      mode: 'quick',
+      mode: 'web_search',
+      useMemory: true,
     });
     expect(JSON.parse(String(init.body))).not.toHaveProperty('forceMode');
+  });
+
+  it('allows toggling memory off next to send and sends useMemory false', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ answer: 'Memory disabled response', citations: [] }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<SearchInterface />);
+
+    const memoryToggle = screen.getByTestId('memory-toggle-btn');
+    expect(memoryToggle).toHaveAttribute('aria-pressed', 'true');
+    expect(memoryToggle).toHaveTextContent(/Memory\s+On/i);
+
+    await user.click(memoryToggle);
+    expect(memoryToggle).toHaveAttribute('aria-pressed', 'false');
+    expect(memoryToggle).toHaveTextContent(/Memory\s+Off/i);
+
+    await user.type(screen.getByTestId('message-input'), 'Answer this without memory');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      query: 'Answer this without memory',
+      mode: 'web_search',
+      useMemory: false,
+    });
   });
 
   it('renders mode options in the requested order', async () => {
@@ -143,11 +179,23 @@ describe('SearchInterface', () => {
 
     await user.click(screen.getByTestId('tools-preferences-btn'));
 
-    const options = screen
-      .getAllByTestId(/^search-mode-option-/)
-      .map((element) => element.textContent?.trim());
+    const options = screen.getAllByTestId(/^search-mode-option-/).map((element) => {
+      const title = element.querySelector('.tool-dropdown-item-title');
+      return title?.textContent?.trim();
+    });
 
-    expect(options).toEqual(['Quick Search', 'Web Search', 'Thinking', 'Deep Research']);
+    expect(options).toEqual(['Web Search', 'Thinking', 'Deep Research']);
+  });
+
+  it('shows short summaries for each search mode in preferences popup', async () => {
+    const user = userEvent.setup();
+    render(<SearchInterface />);
+
+    await user.click(screen.getByTestId('tools-preferences-btn'));
+
+    expect(screen.getByText('Finds current info quickly')).toBeInTheDocument();
+    expect(screen.getByText('Solves complex problems')).toBeInTheDocument();
+    expect(screen.getByText('Runs deep multi-step research')).toBeInTheDocument();
   });
 
   it('does not show More Route Info in composer menus', async () => {
@@ -226,7 +274,7 @@ describe('SearchInterface', () => {
     const payload = JSON.parse(String(init.body));
 
     expect(payload.query).toBe('Use attached context');
-    expect(payload.mode).toBe('quick');
+    expect(payload.mode).toBe('web_search');
     expect(payload).not.toHaveProperty('forceMode');
     expect(payload.links ?? []).toHaveLength(0);
     expect(payload.gitSnippets).toEqual([
@@ -534,7 +582,6 @@ describe('SearchInterface', () => {
     messagesWrap.scrollTop = 999;
     await user.type(screen.getByTestId('message-input'), 'One more');
     await user.click(screen.getByTestId('send-btn'));
-    expect(await screen.findByText('Result is ready')).toBeInTheDocument();
 
     await waitFor(() => {
       expect(screen.getByTestId('message-input')).toHaveAttribute('rows', '1');

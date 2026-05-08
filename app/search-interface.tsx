@@ -13,13 +13,12 @@ import React, {
 import Image from 'next/image';
 import Link from 'next/link';
 
-type SearchMode = 'quick' | 'web_search' | 'thinking' | 'deep_research';
+type SearchMode = 'web_search' | 'thinking' | 'deep_research';
 
-const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string }> = [
-  { value: 'quick', label: 'Quick Search' },
-  { value: 'web_search', label: 'Web Search' },
-  { value: 'thinking', label: 'Thinking' },
-  { value: 'deep_research', label: 'Deep Research' },
+const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string; summary: string }> = [
+  { value: 'web_search', label: 'Web Search', summary: 'Finds current info quickly' },
+  { value: 'thinking', label: 'Thinking', summary: 'Solves complex problems' },
+  { value: 'deep_research', label: 'Deep Research', summary: 'Runs deep multi-step research' },
 ];
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
 
@@ -672,7 +671,8 @@ export default function SearchInterface() {
   const [gitSnippets, setGitSnippets] = useState<GitCodeContext[]>([]);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const [toolsMenuType, setToolsMenuType] = useState<'add' | 'preferences'>('add');
-  const [searchMode, setSearchMode] = useState<SearchMode>('quick');
+  const [searchMode, setSearchMode] = useState<SearchMode>('web_search');
+  const [useMemory, setUseMemory] = useState(true);
   const [welcomeSuggestions, setWelcomeSuggestions] = useState<string[]>(FALLBACK_WELCOME_SUGGESTIONS);
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -956,8 +956,8 @@ export default function SearchInterface() {
   function getModeLabel(mode: SearchMode) {
     const selected = SEARCH_MODE_OPTIONS.find((option) => option.value === mode);
     if (!selected) {
-      console.log('[UI] Unexpected mode value encountered; defaulting to Quick', mode);
-      return 'Quick';
+      console.log('[UI] Unexpected mode value encountered; defaulting to Web Search', mode);
+      return 'Web Search';
     }
     return selected.label;
   }
@@ -1450,6 +1450,7 @@ export default function SearchInterface() {
       const payload = {
         query: userText,
         mode: searchMode,
+        useMemory,
         files: filesSnapshot.map((file) => ({
           name: file.name,
           type: file.type,
@@ -2012,7 +2013,8 @@ export default function SearchInterface() {
                                   setToolsMenuOpen(false);
                                 }}
                               >
-                                {option.label}
+                                <span className="tool-dropdown-item-title">{option.label}</span>
+                                <span className="tool-dropdown-item-summary">{option.summary}</span>
                               </button>
                             ))
                           : null}
@@ -2047,6 +2049,20 @@ export default function SearchInterface() {
                   </div>
 
                   <div id="input-right">
+                    <button
+                      type="button"
+                      className={`memory-toggle-btn ${useMemory ? 'enabled' : 'disabled'}`}
+                      data-testid="memory-toggle-btn"
+                      aria-label={useMemory ? 'Turn memory off' : 'Turn memory on'}
+                      aria-pressed={useMemory}
+                      onClick={() => {
+                        const nextValue = !useMemory;
+                        console.log('[UI] Memory toggle changed', { useMemory: nextValue });
+                        setUseMemory(nextValue);
+                      }}
+                    >
+                      {useMemory ? 'Memory On' : 'Memory Off'}
+                    </button>
                     <button
                       id="send-btn"
                       data-testid="send-btn"
@@ -2623,14 +2639,57 @@ export default function SearchInterface() {
           font-size: 13px;
           padding: 9px 10px;
           border-radius: 8px;
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
+        }
+        .tool-dropdown-item-title {
+          font-size: 17px;
+          line-height: 1.2;
+          font-weight: 600;
+        }
+        .tool-dropdown-item-summary {
+          font-size: 14px;
+          line-height: 1.2;
+          color: #4b5563;
         }
         .tool-dropdown-item:hover { background: #f8fafc; }
         .tool-dropdown-item.active {
           background: #ecfdf5;
           color: #047857;
-          font-weight: 600;
+          box-shadow: inset 0 0 0 1px #34d399;
+        }
+        .tool-dropdown-item.active .tool-dropdown-item-summary {
+          color: #047857;
         }
         #input-right { display: flex; align-items: center; gap: 8px; }
+        .memory-toggle-btn {
+          border: 1px solid #d1d5db;
+          background: #ffffff;
+          color: #0f172a;
+          border-radius: 999px;
+          min-height: 32px;
+          padding: 0 10px;
+          font-size: 13px;
+          font-weight: 600;
+          line-height: 1;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          white-space: nowrap;
+        }
+        .memory-toggle-btn.enabled {
+          border-color: #10b981;
+          background: #ecfdf5;
+          color: #047857;
+        }
+        .memory-toggle-btn.disabled {
+          border-color: #d1d5db;
+          background: #f8fafc;
+          color: #475569;
+        }
+        .memory-toggle-btn:hover { filter: brightness(0.98); }
         #send-btn {
           width: 32px;
           height: 32px;
@@ -2719,6 +2778,11 @@ export default function SearchInterface() {
           .prefs-line-bottom::after {
             width: 4px;
             height: 4px;
+          }
+          .memory-toggle-btn {
+            min-height: 30px;
+            font-size: 12px;
+            padding: 0 9px;
           }
           #send-btn { width: 30px; height: 30px; }
           .tool-dropdown-menu { left: 0; right: auto; min-width: min(220px, calc(100vw - 30px)); }
