@@ -4,8 +4,56 @@ import { beforeEach } from 'vitest';
 import SearchInterface from './search-interface';
 
 describe('SearchInterface', () => {
+  function mockMobileViewport(isMobile: boolean) {
+    const matchMediaMock = vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(max-width: 640px)' ? isMobile : false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      configurable: true,
+      value: matchMediaMock,
+    });
+  }
+
   beforeEach(() => {
     window.localStorage.clear();
+    mockMobileViewport(false);
+  });
+
+  it('keeps the sidebar collapsed by default on mobile viewports', async () => {
+    mockMobileViewport(true);
+    render(<SearchInterface />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
+    });
+    expect(screen.getByTestId('sidebar-backdrop')).not.toHaveClass('show');
+  });
+
+  it('shows and dismisses the mobile sidebar via toggle and backdrop', async () => {
+    const user = userEvent.setup();
+    mockMobileViewport(true);
+    render(<SearchInterface />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
+    });
+
+    await user.click(screen.getByTestId('sidebar-toggle'));
+    expect(screen.getByTestId('sidebar')).not.toHaveClass('collapsed');
+    expect(screen.getByTestId('sidebar-backdrop')).toHaveClass('show');
+
+    await user.click(screen.getByTestId('sidebar-backdrop'));
+    expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
+    expect(screen.getByTestId('sidebar-backdrop')).not.toHaveClass('show');
   });
 
   it('renders app directly and keeps send disabled until input', () => {

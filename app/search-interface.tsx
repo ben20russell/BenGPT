@@ -21,6 +21,14 @@ const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string }> = [
   { value: 'thinking', label: 'Thinking' },
   { value: 'deep_research', label: 'Deep Research' },
 ];
+const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
+
+function detectMobileViewport(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches;
+}
 
 type Citation = {
   url?: string;
@@ -609,7 +617,8 @@ export default function SearchInterface() {
   const [deviceId, setDeviceId] = useState('');
   const [recentsHydrated, setRecentsHydrated] = useState(false);
 
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
+  const [sidebarOpen, setSidebarOpen] = useState(() => !detectMobileViewport());
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null);
@@ -665,6 +674,32 @@ export default function SearchInterface() {
       console.log('[UI] Initial paint lock released');
     }, 0);
     return () => window.clearTimeout(bootTimer);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+
+    const mediaQuery = window.matchMedia(MOBILE_BREAKPOINT_QUERY);
+    let wasMobile = mediaQuery.matches;
+    if (mediaQuery.matches) {
+      console.log('[UI] Mobile viewport detected');
+    }
+
+    const onViewportChange = (event: MediaQueryListEvent) => {
+      const isMobile = event.matches;
+      console.log('[UI] Viewport breakpoint changed', { isMobile });
+      setIsMobileViewport(isMobile);
+      if (isMobile && !wasMobile) {
+        setSidebarOpen(false);
+      }
+      if (!isMobile && wasMobile) {
+        setSidebarOpen(true);
+      }
+      wasMobile = isMobile;
+    };
+
+    mediaQuery.addEventListener('change', onViewportChange);
+    return () => mediaQuery.removeEventListener('change', onViewportChange);
   }, []);
 
   useEffect(() => {
@@ -923,6 +958,9 @@ export default function SearchInterface() {
     setInput('');
     setPendingTurnId(null);
     setSearching(false);
+    if (isMobileViewport) {
+      setSidebarOpen(false);
+    }
   }
 
   function onBrandNewChatClick(event: ReactMouseEvent<HTMLAnchorElement>) {
@@ -1585,6 +1623,9 @@ export default function SearchInterface() {
                           if (conversation.id !== activeConversationId) {
                             console.log('[UI] Loading conversation', conversation.id);
                             setActiveConversationId(conversation.id);
+                            if (isMobileViewport) {
+                              setSidebarOpen(false);
+                            }
                             return;
                           }
                           beginInlineRename(conversation.id);
@@ -1636,6 +1677,18 @@ export default function SearchInterface() {
 
             <div id="sidebar-bottom" />
           </aside>
+          <button
+            type="button"
+            id="sidebar-backdrop"
+            className={sidebarOpen && isMobileViewport ? 'show' : ''}
+            data-testid="sidebar-backdrop"
+            aria-hidden={!(sidebarOpen && isMobileViewport)}
+            tabIndex={sidebarOpen && isMobileViewport ? 0 : -1}
+            onClick={() => {
+              console.log('[UI] Mobile sidebar backdrop clicked');
+              setSidebarOpen(false);
+            }}
+          />
 
           <main id="main">
             <div id="topbar">
@@ -2003,8 +2056,15 @@ export default function SearchInterface() {
           display: flex;
           flex-direction: column;
           border-right: 1px solid var(--border);
+          transition: transform 0.24s ease;
         }
         #sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
+        #sidebar-backdrop {
+          display: none;
+          border: none;
+          padding: 0;
+          margin: 0;
+        }
         #sidebar-top { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
         #new-chat-btn, .conv-item, .mode-pill, .action-btn, .suggestion-btn, #send-btn, #sidebar-toggle, .tool-dropdown-btn, .tool-dropdown-item {
           cursor: pointer;
@@ -2441,13 +2501,45 @@ export default function SearchInterface() {
         }
 
         @media (max-width: 640px) {
-          #sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 60; transform: translateX(-100%); }
+          #sidebar {
+            position: fixed;
+            top: 56px;
+            left: 0;
+            bottom: 0;
+            z-index: 100;
+            width: min(84vw, 320px);
+            min-width: min(84vw, 320px);
+            background: #ffffff;
+            border-right: 1px solid #e5e7eb;
+            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.15);
+            transform: translateX(-100%);
+          }
           #sidebar:not(.collapsed) { transform: translateX(0); }
+          #sidebar-backdrop {
+            display: block;
+            position: fixed;
+            inset: 56px 0 0;
+            z-index: 90;
+            background: rgba(15, 23, 42, 0.32);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+          }
+          #sidebar-backdrop.show {
+            opacity: 1;
+            pointer-events: auto;
+          }
           #topbar { padding: 10px 12px; }
           #chat-title { min-width: 0; width: 100%; order: 2; }
           .top-action-btn { order: 4; width: 100%; border-radius: 12px; }
           #input-area { padding: 14px 10px 16px; }
           #input-wrapper { padding: 10px 12px; border-radius: 14px; }
+          #messages { padding: 16px 12px 12px; }
+          .msg-group { padding: 10px 0; }
+          .user-bubble { max-width: 92%; }
+          .ai-text { font-size: 15px; line-height: 1.62; }
+          .citations { gap: 7px; }
+          .cite-item { padding: 10px; }
           .tool-dropdown-btn { max-width: 100%; }
           .tool-dropdown-menu { left: 0; right: auto; min-width: min(220px, calc(100vw - 30px)); }
           #input-footer { gap: 8px; }
