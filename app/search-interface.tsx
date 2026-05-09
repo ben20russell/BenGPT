@@ -717,7 +717,7 @@ export default function SearchInterface() {
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
   const [isMobileUserAgent, setIsMobileUserAgent] = useState(detectMobileUserAgent);
   const [mobileBrowser, setMobileBrowser] = useState<MobileBrowser>(detectMobileBrowser);
-  const [sidebarOpen, setSidebarOpen] = useState(() => !detectMobileLayout());
+  const [mobileRecentsMenuOpen, setMobileRecentsMenuOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null);
@@ -744,7 +744,6 @@ export default function SearchInterface() {
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
-  const previousIsMobileLayoutRef = useRef(detectMobileLayout());
   const isMobileLayout = isMobileViewport || isMobileUserAgent;
   const mobileBrowserClass = mobileBrowser === 'unknown' ? '' : `mobile-browser-${mobileBrowser}`;
   const uiRootClassName = ['search-ui', isUiBooted ? 'booted' : 'booting', isMobileLayout ? 'mobile-device' : '', mobileBrowserClass]
@@ -817,17 +816,12 @@ export default function SearchInterface() {
   }, []);
 
   useEffect(() => {
-    const wasMobileLayout = previousIsMobileLayoutRef.current;
-    if (isMobileLayout === wasMobileLayout) return;
+    if (isMobileLayout) return;
+    if (!mobileRecentsMenuOpen) return;
 
-    console.log('[UI] Mobile layout mode changed', { wasMobileLayout, isMobileLayout });
-    if (isMobileLayout) {
-      setSidebarOpen(false);
-    } else {
-      setSidebarOpen(true);
-    }
-    previousIsMobileLayoutRef.current = isMobileLayout;
-  }, [isMobileLayout]);
+    console.log('[UI] Closing mobile recents menu after switching to desktop layout');
+    setMobileRecentsMenuOpen(false);
+  }, [isMobileLayout, mobileRecentsMenuOpen]);
 
   useEffect(() => {
     if (!deviceId) return;
@@ -1069,7 +1063,7 @@ export default function SearchInterface() {
     setPendingTurnId(null);
     setSearching(false);
     if (isMobileLayout) {
-      setSidebarOpen(false);
+      setMobileRecentsMenuOpen(false);
     }
   }
 
@@ -1709,6 +1703,131 @@ export default function SearchInterface() {
     }
   }
 
+  function renderRecentsPanel() {
+    return (
+      <>
+        <div id="sidebar-top">
+          <button id="new-chat-btn" data-testid="new-chat-btn" type="button" onClick={startNewChat}>
+            New chat
+          </button>
+        </div>
+        <div className="sidebar-section-label">Recents</div>
+        <div id="conv-list" data-testid="conv-list">
+          {conversations.map((conversation, index) => (
+            <React.Fragment key={conversation.id}>
+              {recentlyDeletedConversation && recentlyDeletedConversation.index === index ? (
+                <div
+                  className="conv-row conv-row-deleted"
+                  data-testid={`conversation-deleted-row-${recentlyDeletedConversation.conversation.id}`}
+                >
+                  <div className="conv-item conv-item-deleted">
+                    Deleted: {recentlyDeletedConversation.conversation.title}
+                  </div>
+                  <button
+                    type="button"
+                    className="conv-inline-action"
+                    data-testid={`conversation-undo-${recentlyDeletedConversation.conversation.id}`}
+                    onClick={undoDeleteConversation}
+                  >
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    className="conv-inline-action"
+                    data-testid={`conversation-dismiss-${recentlyDeletedConversation.conversation.id}`}
+                    onClick={dismissDeletedConversationRow}
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : null}
+              <div
+                className={`conv-row ${conversation.id === activeConversationId ? 'active' : ''}`}
+                data-testid={`conversation-row-${conversation.id}`}
+              >
+                {editingConversationId === conversation.id ? (
+                  <input
+                    className="conv-title-input"
+                    data-testid={`conversation-edit-${conversation.id}`}
+                    value={editingConversationTitle}
+                    onChange={(event) => setEditingConversationTitle(event.target.value)}
+                    onBlur={() => commitInlineRename(conversation.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commitInlineRename(conversation.id);
+                      } else if (event.key === 'Escape') {
+                        event.preventDefault();
+                        cancelInlineRename();
+                      }
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className={`conv-item ${conversation.id === activeConversationId ? 'active' : ''}`}
+                    data-testid={`conversation-open-${conversation.id}`}
+                    onClick={() => {
+                      if (conversation.id !== activeConversationId) {
+                        console.log('[UI] Loading conversation', conversation.id);
+                        setActiveConversationId(conversation.id);
+                        if (isMobileLayout) {
+                          setMobileRecentsMenuOpen(false);
+                        }
+                        return;
+                      }
+                      beginInlineRename(conversation.id);
+                    }}
+                  >
+                    {conversation.title}
+                  </button>
+                )}
+                {editingConversationId === conversation.id ? (
+                  <button
+                    type="button"
+                    className="conv-row-delete"
+                    data-testid={`conversation-delete-${conversation.id}`}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => deleteConversation(conversation.id)}
+                    aria-label={`Delete ${conversation.title}`}
+                  >
+                    Delete
+                  </button>
+                ) : null}
+              </div>
+            </React.Fragment>
+          ))}
+          {recentlyDeletedConversation && recentlyDeletedConversation.index >= conversations.length ? (
+            <div
+              className="conv-row conv-row-deleted"
+              data-testid={`conversation-deleted-row-${recentlyDeletedConversation.conversation.id}`}
+            >
+              <div className="conv-item conv-item-deleted">Deleted: {recentlyDeletedConversation.conversation.title}</div>
+              <button
+                type="button"
+                className="conv-inline-action"
+                data-testid={`conversation-undo-${recentlyDeletedConversation.conversation.id}`}
+                onClick={undoDeleteConversation}
+              >
+                Undo
+              </button>
+              <button
+                type="button"
+                className="conv-inline-action"
+                data-testid={`conversation-dismiss-${recentlyDeletedConversation.conversation.id}`}
+                onClick={dismissDeletedConversationRow}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
+        </div>
+        <div id="sidebar-bottom" />
+      </>
+    );
+  }
+
   return (
     <UIErrorBoundary>
       <div className={uiRootClassName} data-testid="search-ui-root">
@@ -1729,137 +1848,21 @@ export default function SearchInterface() {
             </div>
           </header>
 
-          <aside id="sidebar" className={!sidebarOpen ? 'collapsed' : ''} data-testid="sidebar">
-            <div id="sidebar-top">
-              <button id="new-chat-btn" data-testid="new-chat-btn" type="button" onClick={startNewChat}>
-                New chat
-              </button>
-            </div>
-            <div className="sidebar-section-label">Recents</div>
-            <div id="conv-list" data-testid="conv-list">
-              {conversations.map((conversation, index) => (
-                <React.Fragment key={conversation.id}>
-                  {recentlyDeletedConversation && recentlyDeletedConversation.index === index ? (
-                    <div
-                      className="conv-row conv-row-deleted"
-                      data-testid={`conversation-deleted-row-${recentlyDeletedConversation.conversation.id}`}
-                    >
-                      <div className="conv-item conv-item-deleted">
-                        Deleted: {recentlyDeletedConversation.conversation.title}
-                      </div>
-                      <button
-                        type="button"
-                        className="conv-inline-action"
-                        data-testid={`conversation-undo-${recentlyDeletedConversation.conversation.id}`}
-                        onClick={undoDeleteConversation}
-                      >
-                        Undo
-                      </button>
-                      <button
-                        type="button"
-                        className="conv-inline-action"
-                        data-testid={`conversation-dismiss-${recentlyDeletedConversation.conversation.id}`}
-                        onClick={dismissDeletedConversationRow}
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ) : null}
-                  <div
-                    className={`conv-row ${conversation.id === activeConversationId ? 'active' : ''}`}
-                    data-testid={`conversation-row-${conversation.id}`}
-                  >
-                    {editingConversationId === conversation.id ? (
-                      <input
-                        className="conv-title-input"
-                        data-testid={`conversation-edit-${conversation.id}`}
-                        value={editingConversationTitle}
-                        onChange={(event) => setEditingConversationTitle(event.target.value)}
-                        onBlur={() => commitInlineRename(conversation.id)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') {
-                            event.preventDefault();
-                            commitInlineRename(conversation.id);
-                          } else if (event.key === 'Escape') {
-                            event.preventDefault();
-                            cancelInlineRename();
-                          }
-                        }}
-                        autoFocus
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        className={`conv-item ${conversation.id === activeConversationId ? 'active' : ''}`}
-                        data-testid={`conversation-open-${conversation.id}`}
-                        onClick={() => {
-                          if (conversation.id !== activeConversationId) {
-                            console.log('[UI] Loading conversation', conversation.id);
-                            setActiveConversationId(conversation.id);
-                            if (isMobileLayout) {
-                              setSidebarOpen(false);
-                            }
-                            return;
-                          }
-                          beginInlineRename(conversation.id);
-                        }}
-                      >
-                        {conversation.title}
-                      </button>
-                    )}
-                    {editingConversationId === conversation.id ? (
-                      <button
-                        type="button"
-                        className="conv-row-delete"
-                        data-testid={`conversation-delete-${conversation.id}`}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => deleteConversation(conversation.id)}
-                        aria-label={`Delete ${conversation.title}`}
-                      >
-                        Delete
-                      </button>
-                    ) : null}
-                  </div>
-                </React.Fragment>
-              ))}
-              {recentlyDeletedConversation && recentlyDeletedConversation.index >= conversations.length ? (
-                <div
-                  className="conv-row conv-row-deleted"
-                  data-testid={`conversation-deleted-row-${recentlyDeletedConversation.conversation.id}`}
-                >
-                  <div className="conv-item conv-item-deleted">Deleted: {recentlyDeletedConversation.conversation.title}</div>
-                  <button
-                    type="button"
-                    className="conv-inline-action"
-                    data-testid={`conversation-undo-${recentlyDeletedConversation.conversation.id}`}
-                    onClick={undoDeleteConversation}
-                  >
-                    Undo
-                  </button>
-                  <button
-                    type="button"
-                    className="conv-inline-action"
-                    data-testid={`conversation-dismiss-${recentlyDeletedConversation.conversation.id}`}
-                    onClick={dismissDeletedConversationRow}
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
-            </div>
-
-            <div id="sidebar-bottom" />
-          </aside>
+          {!isMobileLayout ? (
+            <aside id="sidebar" data-testid="sidebar">
+              {renderRecentsPanel()}
+            </aside>
+          ) : null}
           <button
             type="button"
-            id="sidebar-backdrop"
-            className={sidebarOpen && isMobileLayout ? 'show' : ''}
-            data-testid="sidebar-backdrop"
-            aria-hidden={!(sidebarOpen && isMobileLayout)}
-            tabIndex={sidebarOpen && isMobileLayout ? 0 : -1}
+            id="mobile-recents-backdrop"
+            className={mobileRecentsMenuOpen && isMobileLayout ? 'show' : ''}
+            data-testid="mobile-recents-backdrop"
+            aria-hidden={!(mobileRecentsMenuOpen && isMobileLayout)}
+            tabIndex={mobileRecentsMenuOpen && isMobileLayout ? 0 : -1}
             onClick={() => {
-              console.log('[UI] Mobile sidebar backdrop clicked');
-              setSidebarOpen(false);
+              console.log('[UI] Mobile recents menu backdrop clicked');
+              setMobileRecentsMenuOpen(false);
             }}
           />
 
@@ -1871,9 +1874,11 @@ export default function SearchInterface() {
                   data-testid="sidebar-toggle"
                   type="button"
                   aria-label="Open recent chats menu"
+                  aria-expanded={mobileRecentsMenuOpen}
                   onClick={() => {
-                    console.log('[UI] Sidebar toggle clicked');
-                    setSidebarOpen((prev) => !prev);
+                    const nextOpen = !mobileRecentsMenuOpen;
+                    console.log('[UI] Mobile recents menu toggle clicked', { nextOpen });
+                    setMobileRecentsMenuOpen(nextOpen);
                   }}
                 >
                   ☰
@@ -1893,6 +1898,11 @@ export default function SearchInterface() {
                 </button>
               ) : null}
             </div>
+            {isMobileLayout && mobileRecentsMenuOpen ? (
+              <div id="mobile-recents-menu" data-testid="mobile-recents-menu">
+                {renderRecentsPanel()}
+              </div>
+            ) : null}
 
             {!activeConversation || activeConversation.turns.length === 0 ? (
               <div id="welcome" data-testid="welcome-screen">
@@ -2293,10 +2303,8 @@ export default function SearchInterface() {
           display: flex;
           flex-direction: column;
           border-right: 1px solid var(--border);
-          transition: transform 0.24s ease;
         }
-        #sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
-        #sidebar-backdrop {
+        #mobile-recents-backdrop {
           display: none;
           border: none;
           padding: 0;
@@ -2391,8 +2399,31 @@ export default function SearchInterface() {
           padding: 12px 16px;
           border-bottom: 1px solid transparent;
           background: #ffffff;
+          position: relative;
         }
         #sidebar-toggle { background: transparent; border: none; color: var(--text-secondary); }
+        #mobile-recents-menu {
+          position: absolute;
+          top: calc(100% + 8px);
+          left: 12px;
+          right: 12px;
+          max-height: min(60vh, 480px);
+          overflow-y: auto;
+          z-index: 130;
+          border: 1px solid #d1d5db;
+          border-radius: 14px;
+          background: #ffffff;
+          box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+        }
+        #mobile-recents-menu #sidebar-top {
+          padding: 12px;
+        }
+        #mobile-recents-menu #conv-list {
+          max-height: min(45vh, 360px);
+        }
+        #mobile-recents-menu #sidebar-bottom {
+          display: none;
+        }
         #chat-title { flex: 1; min-width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
         .top-action-btn {
           border: 1px solid var(--border);
@@ -2857,21 +2888,7 @@ export default function SearchInterface() {
           #app {
             min-height: 100dvh;
           }
-          #sidebar {
-            position: fixed;
-            top: calc(56px + env(safe-area-inset-top, 0px));
-            left: 0;
-            bottom: 0;
-            z-index: 100;
-            width: min(84vw, 320px);
-            min-width: min(84vw, 320px);
-            background: #ffffff;
-            border-right: 1px solid #e5e7eb;
-            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.15);
-            transform: translateX(-100%);
-          }
-          #sidebar:not(.collapsed) { transform: translateX(0); }
-          #sidebar-backdrop {
+          #mobile-recents-backdrop {
             display: block;
             position: fixed;
             inset: calc(56px + env(safe-area-inset-top, 0px)) 0 0;
@@ -2881,7 +2898,7 @@ export default function SearchInterface() {
             pointer-events: none;
             transition: opacity 0.2s ease;
           }
-          #sidebar-backdrop.show {
+          #mobile-recents-backdrop.show {
             opacity: 1;
             pointer-events: auto;
           }

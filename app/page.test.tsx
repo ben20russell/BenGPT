@@ -82,45 +82,46 @@ describe('SearchInterface', () => {
         expect(screen.getByTestId('search-ui-root')).toHaveClass('mobile-device');
       });
       expect(screen.getByTestId('search-ui-root')).toHaveClass(expectedBrowserClass);
-      expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
-      expect(screen.getByTestId('sidebar-backdrop')).not.toHaveClass('show');
+      expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
+      expect(screen.getByTestId('sidebar-toggle')).toBeInTheDocument();
+      expect(screen.queryByTestId('mobile-recents-menu')).not.toBeInTheDocument();
     },
   );
 
-  it('keeps the sidebar collapsed by default on mobile viewports', async () => {
+  it('keeps the mobile recents hamburger menu closed by default on mobile viewports', async () => {
     mockMobileViewport(true);
     render(<SearchInterface />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
+      expect(screen.getByTestId('sidebar-toggle')).toBeInTheDocument();
     });
-    expect(screen.getByTestId('sidebar-toggle')).toBeInTheDocument();
-    expect(screen.getByTestId('sidebar-backdrop')).not.toHaveClass('show');
+    expect(screen.queryByTestId('mobile-recents-menu')).not.toBeInTheDocument();
   });
 
-  it('shows and dismisses the mobile sidebar via toggle and backdrop', async () => {
+  it('shows and dismisses the mobile recents hamburger menu via toggle and backdrop', async () => {
     const user = userEvent.setup();
     mockMobileViewport(true);
     render(<SearchInterface />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
+      expect(screen.getByTestId('sidebar-toggle')).toBeInTheDocument();
     });
 
     await user.click(screen.getByTestId('sidebar-toggle'));
-    expect(screen.getByTestId('sidebar')).not.toHaveClass('collapsed');
-    expect(screen.getByTestId('sidebar-backdrop')).toHaveClass('show');
+    expect(screen.getByTestId('mobile-recents-menu')).toBeInTheDocument();
+    expect(screen.getByTestId('mobile-recents-backdrop')).toHaveClass('show');
 
-    await user.click(screen.getByTestId('sidebar-backdrop'));
-    expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
-    expect(screen.getByTestId('sidebar-backdrop')).not.toHaveClass('show');
+    await user.click(screen.getByTestId('mobile-recents-backdrop'));
+    expect(screen.queryByTestId('mobile-recents-menu')).not.toBeInTheDocument();
+    expect(screen.getByTestId('mobile-recents-backdrop')).not.toHaveClass('show');
   });
 
   it('keeps recents visible on desktop without a hamburger toggle', () => {
     mockMobileViewport(false);
     render(<SearchInterface />);
 
-    expect(screen.getByTestId('sidebar')).not.toHaveClass('collapsed');
+    expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+    expect(screen.getByTestId('conv-list')).toBeInTheDocument();
     expect(screen.queryByTestId('sidebar-toggle')).not.toBeInTheDocument();
   });
 
