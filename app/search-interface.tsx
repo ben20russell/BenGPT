@@ -1865,17 +1865,20 @@ export default function SearchInterface() {
 
           <main id="main">
             <div id="topbar">
-              <button
-                id="sidebar-toggle"
-                data-testid="sidebar-toggle"
-                type="button"
-                onClick={() => {
-                  console.log('[UI] Sidebar toggle clicked');
-                  setSidebarOpen((prev) => !prev);
-                }}
-              >
-                ☰
-              </button>
+              {isMobileLayout ? (
+                <button
+                  id="sidebar-toggle"
+                  data-testid="sidebar-toggle"
+                  type="button"
+                  aria-label="Open recent chats menu"
+                  onClick={() => {
+                    console.log('[UI] Sidebar toggle clicked');
+                    setSidebarOpen((prev) => !prev);
+                  }}
+                >
+                  ☰
+                </button>
+              ) : null}
               <span id="chat-title" data-testid="chat-title">
                 {activeConversation?.title ?? 'New chat'}
               </span>

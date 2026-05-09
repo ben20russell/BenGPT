@@ -94,6 +94,7 @@ describe('SearchInterface', () => {
     await waitFor(() => {
       expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
     });
+    expect(screen.getByTestId('sidebar-toggle')).toBeInTheDocument();
     expect(screen.getByTestId('sidebar-backdrop')).not.toHaveClass('show');
   });
 
@@ -113,6 +114,14 @@ describe('SearchInterface', () => {
     await user.click(screen.getByTestId('sidebar-backdrop'));
     expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
     expect(screen.getByTestId('sidebar-backdrop')).not.toHaveClass('show');
+  });
+
+  it('keeps recents visible on desktop without a hamburger toggle', () => {
+    mockMobileViewport(false);
+    render(<SearchInterface />);
+
+    expect(screen.getByTestId('sidebar')).not.toHaveClass('collapsed');
+    expect(screen.queryByTestId('sidebar-toggle')).not.toBeInTheDocument();
   });
 
   it('renders app directly and keeps send disabled until input', () => {
