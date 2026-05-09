@@ -14,6 +14,13 @@ import Image from 'next/image';
 import Link from 'next/link';
 
 type SearchMode = 'web_search' | 'thinking' | 'deep_research';
+type MobileBrowser =
+  | 'ios-safari'
+  | 'android-chrome'
+  | 'samsung-internet'
+  | 'firefox-android'
+  | 'edge-android'
+  | 'unknown';
 
 const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string; summary: string }> = [
   { value: 'web_search', label: 'Web Search', summary: 'Finds current info quickly' },
@@ -27,6 +34,60 @@ function detectMobileViewport(): boolean {
     return false;
   }
   return window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches;
+}
+
+function getUserAgentString(explicitUserAgent?: string): string {
+  if (typeof explicitUserAgent === 'string') {
+    return explicitUserAgent.toLowerCase();
+  }
+  if (typeof navigator === 'undefined') {
+    return '';
+  }
+  return String(navigator.userAgent || '').toLowerCase();
+}
+
+function detectMobileUserAgent(explicitUserAgent?: string): boolean {
+  const userAgent = getUserAgentString(explicitUserAgent);
+  if (!userAgent) return false;
+  return /(android|iphone|ipad|ipod|mobile|windows phone|iemobile|opera mini|blackberry)/i.test(userAgent);
+}
+
+function detectMobileBrowser(explicitUserAgent?: string): MobileBrowser {
+  const userAgent = getUserAgentString(explicitUserAgent);
+  if (!userAgent || !detectMobileUserAgent(userAgent)) {
+    return 'unknown';
+  }
+
+  const isAndroid = userAgent.includes('android');
+  const isIos = /(iphone|ipad|ipod)/.test(userAgent);
+
+  if (isAndroid && userAgent.includes('samsungbrowser/')) {
+    return 'samsung-internet';
+  }
+  if (isAndroid && userAgent.includes('edga/')) {
+    return 'edge-android';
+  }
+  if (isAndroid && userAgent.includes('firefox/')) {
+    return 'firefox-android';
+  }
+  if (isAndroid && userAgent.includes('chrome/')) {
+    return 'android-chrome';
+  }
+  if (
+    isIos &&
+    userAgent.includes('safari/') &&
+    !userAgent.includes('crios/') &&
+    !userAgent.includes('fxios/') &&
+    !userAgent.includes('edgios/')
+  ) {
+    return 'ios-safari';
+  }
+
+  return 'unknown';
+}
+
+function detectMobileLayout(): boolean {
+  return detectMobileViewport() || detectMobileUserAgent();
 }
 
 function initializeDeviceId(): string {
@@ -654,7 +715,9 @@ export default function SearchInterface() {
   const [recentsHydrated, setRecentsHydrated] = useState(false);
 
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
-  const [sidebarOpen, setSidebarOpen] = useState(() => !detectMobileViewport());
+  const [isMobileUserAgent, setIsMobileUserAgent] = useState(detectMobileUserAgent);
+  const [mobileBrowser, setMobileBrowser] = useState<MobileBrowser>(detectMobileBrowser);
+  const [sidebarOpen, setSidebarOpen] = useState(() => !detectMobileLayout());
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null);
@@ -681,6 +744,12 @@ export default function SearchInterface() {
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
+  const previousIsMobileLayoutRef = useRef(detectMobileLayout());
+  const isMobileLayout = isMobileViewport || isMobileUserAgent;
+  const mobileBrowserClass = mobileBrowser === 'unknown' ? '' : `mobile-browser-${mobileBrowser}`;
+  const uiRootClassName = ['search-ui', isUiBooted ? 'booted' : 'booting', isMobileLayout ? 'mobile-device' : '', mobileBrowserClass]
+    .filter(Boolean)
+    .join(' ');
 
   const activeConversation = useMemo(
     () => conversations.find((c) => c.id === activeConversationId) ?? null,
@@ -717,10 +786,22 @@ export default function SearchInterface() {
   }, []);
 
   useEffect(() => {
+    const nextIsMobileUserAgent = detectMobileUserAgent();
+    const nextMobileBrowser = detectMobileBrowser();
+    console.log('[UI] User-agent mobile detection evaluated', {
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      isMobileUserAgent: nextIsMobileUserAgent,
+      mobileBrowser: nextMobileBrowser,
+    });
+    setIsMobileUserAgent(nextIsMobileUserAgent);
+    setMobileBrowser(nextMobileBrowser);
+  }, []);
+
+  useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
 
     const mediaQuery = window.matchMedia(MOBILE_BREAKPOINT_QUERY);
-    let wasMobile = mediaQuery.matches;
+    setIsMobileViewport(mediaQuery.matches);
     if (mediaQuery.matches) {
       console.log('[UI] Mobile viewport detected');
     }
@@ -729,18 +810,24 @@ export default function SearchInterface() {
       const isMobile = event.matches;
       console.log('[UI] Viewport breakpoint changed', { isMobile });
       setIsMobileViewport(isMobile);
-      if (isMobile && !wasMobile) {
-        setSidebarOpen(false);
-      }
-      if (!isMobile && wasMobile) {
-        setSidebarOpen(true);
-      }
-      wasMobile = isMobile;
     };
 
     mediaQuery.addEventListener('change', onViewportChange);
     return () => mediaQuery.removeEventListener('change', onViewportChange);
   }, []);
+
+  useEffect(() => {
+    const wasMobileLayout = previousIsMobileLayoutRef.current;
+    if (isMobileLayout === wasMobileLayout) return;
+
+    console.log('[UI] Mobile layout mode changed', { wasMobileLayout, isMobileLayout });
+    if (isMobileLayout) {
+      setSidebarOpen(false);
+    } else {
+      setSidebarOpen(true);
+    }
+    previousIsMobileLayoutRef.current = isMobileLayout;
+  }, [isMobileLayout]);
 
   useEffect(() => {
     if (!deviceId) return;
@@ -981,7 +1068,7 @@ export default function SearchInterface() {
     setInput('');
     setPendingTurnId(null);
     setSearching(false);
-    if (isMobileViewport) {
+    if (isMobileLayout) {
       setSidebarOpen(false);
     }
   }
@@ -1624,7 +1711,7 @@ export default function SearchInterface() {
 
   return (
     <UIErrorBoundary>
-      <div className={`search-ui ${isUiBooted ? 'booted' : 'booting'}`} data-testid="search-ui-root">
+      <div className={uiRootClassName} data-testid="search-ui-root">
         <div id="app" data-testid="app-root">
           <header id="app-header" data-testid="app-header">
             <div className="app-header-inner">
@@ -1709,7 +1796,7 @@ export default function SearchInterface() {
                           if (conversation.id !== activeConversationId) {
                             console.log('[UI] Loading conversation', conversation.id);
                             setActiveConversationId(conversation.id);
-                            if (isMobileViewport) {
+                            if (isMobileLayout) {
                               setSidebarOpen(false);
                             }
                             return;
@@ -1766,10 +1853,10 @@ export default function SearchInterface() {
           <button
             type="button"
             id="sidebar-backdrop"
-            className={sidebarOpen && isMobileViewport ? 'show' : ''}
+            className={sidebarOpen && isMobileLayout ? 'show' : ''}
             data-testid="sidebar-backdrop"
-            aria-hidden={!(sidebarOpen && isMobileViewport)}
-            tabIndex={sidebarOpen && isMobileViewport ? 0 : -1}
+            aria-hidden={!(sidebarOpen && isMobileLayout)}
+            tabIndex={sidebarOpen && isMobileLayout ? 0 : -1}
             onClick={() => {
               console.log('[UI] Mobile sidebar backdrop clicked');
               setSidebarOpen(false);
@@ -2137,13 +2224,22 @@ export default function SearchInterface() {
         }
         .search-ui.booting #app { visibility: hidden; }
         .search-ui.booted #app { visibility: visible; }
-        #app { display: flex; height: 100vh; overflow: hidden; padding-top: 56px; position: relative; }
+        #app {
+          display: flex;
+          height: 100vh;
+          height: 100dvh;
+          min-height: 100svh;
+          overflow: hidden;
+          padding-top: calc(56px + env(safe-area-inset-top, 0px));
+          position: relative;
+        }
         #app-header {
           position: fixed;
           top: 0;
           left: 0;
           right: 0;
-          height: 56px;
+          height: calc(56px + env(safe-area-inset-top, 0px));
+          padding-top: env(safe-area-inset-top, 0px);
           border-bottom: 1px solid var(--border);
           background: #ffffff;
           z-index: 80;
@@ -2280,6 +2376,7 @@ export default function SearchInterface() {
           display: flex;
           flex-direction: column;
           overflow: hidden;
+          overscroll-behavior: contain;
           background: var(--main-bg);
           border-left: 1px solid #ffffff;
         }
@@ -2471,7 +2568,7 @@ export default function SearchInterface() {
         #input-area {
           flex: 0 0 auto;
           border-top: 1px solid transparent;
-          padding: 40px 20px 0;
+          padding: 40px 20px calc(12px + env(safe-area-inset-bottom, 0px));
           background: #ffffff;
         }
         #page-bottom-anchor {
@@ -2516,6 +2613,7 @@ export default function SearchInterface() {
           overflow: hidden;
           text-overflow: ellipsis;
           font-size: 12px;
+          overflow-wrap: anywhere;
         }
         .context-chip-remove {
           border: none;
@@ -2561,6 +2659,7 @@ export default function SearchInterface() {
           text-align: left;
           width: fit-content;
           max-width: 100%;
+          overflow-wrap: anywhere;
         }
         .actionable-step-btn:hover {
           background: #eef2ff;
@@ -2730,6 +2829,12 @@ export default function SearchInterface() {
         #send-btn:hover { filter: brightness(1.06); }
         #send-btn:disabled { filter: grayscale(0.18) brightness(0.95); cursor: not-allowed; }
         .subheader-copy { padding-top: 25px; }
+        .user-bubble,
+        .ai-text,
+        .cite-title {
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
 
         #toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: #111827; border: 1px solid #111827; border-radius: var(--radius-md); padding: 9px 18px; font-size: 13px; color: #ffffff; z-index: 200; opacity: 0; transition: opacity .25s; pointer-events: none; box-shadow: 0 10px 24px rgba(15,23,42,0.2); }
         #toast.show { opacity: 1; }
@@ -2746,9 +2851,12 @@ export default function SearchInterface() {
         }
 
         @media (max-width: 640px) {
+          #app {
+            min-height: 100dvh;
+          }
           #sidebar {
             position: fixed;
-            top: 56px;
+            top: calc(56px + env(safe-area-inset-top, 0px));
             left: 0;
             bottom: 0;
             z-index: 100;
@@ -2763,7 +2871,7 @@ export default function SearchInterface() {
           #sidebar-backdrop {
             display: block;
             position: fixed;
-            inset: 56px 0 0;
+            inset: calc(56px + env(safe-area-inset-top, 0px)) 0 0;
             z-index: 90;
             background: rgba(15, 23, 42, 0.32);
             opacity: 0;
@@ -2777,7 +2885,7 @@ export default function SearchInterface() {
           #topbar { padding: 10px 12px; }
           #chat-title { min-width: 0; width: 100%; order: 2; }
           .top-action-btn { order: 4; width: 100%; border-radius: 12px; }
-          #input-area { padding: 14px 10px 16px; }
+          #input-area { padding: 14px 10px calc(14px + env(safe-area-inset-bottom, 0px)); }
           #input-wrapper { padding: 10px 12px; border-radius: 14px; }
           #messages { padding: 16px 12px 12px; }
           .msg-group { padding: 10px 0; }
@@ -2798,7 +2906,13 @@ export default function SearchInterface() {
             font-size: 12px;
             padding: 0 9px;
           }
-          #send-btn { width: 30px; height: 30px; }
+          #send-btn { width: 42px; height: 42px; }
+          #sidebar-toggle,
+          .tool-circle-btn,
+          .memory-toggle-btn,
+          .top-action-btn {
+            min-height: 42px;
+          }
           .tool-dropdown-menu { left: 0; right: auto; min-width: min(220px, calc(100vw - 30px)); }
           #input-footer { gap: 8px; }
           #welcome h1 { font-size: 30px; text-align: center; }

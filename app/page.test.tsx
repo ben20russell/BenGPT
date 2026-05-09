@@ -4,6 +4,15 @@ import { beforeEach } from 'vitest';
 import SearchInterface from './search-interface';
 
 describe('SearchInterface', () => {
+  const originalUserAgent = navigator.userAgent;
+
+  function mockUserAgent(userAgent: string) {
+    Object.defineProperty(window.navigator, 'userAgent', {
+      configurable: true,
+      value: userAgent,
+    });
+  }
+
   function mockMobileViewport(isMobile: boolean) {
     const matchMediaMock = vi.fn().mockImplementation((query: string) => ({
       matches: query === '(max-width: 640px)' ? isMobile : false,
@@ -25,8 +34,58 @@ describe('SearchInterface', () => {
 
   beforeEach(() => {
     window.localStorage.clear();
+    mockUserAgent(originalUserAgent);
     mockMobileViewport(false);
   });
+
+  const popularMobileBrowsers = [
+    {
+      label: 'iOS Safari',
+      userAgent:
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1',
+      expectedBrowserClass: 'mobile-browser-ios-safari',
+    },
+    {
+      label: 'Android Chrome',
+      userAgent:
+        'Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36',
+      expectedBrowserClass: 'mobile-browser-android-chrome',
+    },
+    {
+      label: 'Samsung Internet',
+      userAgent:
+        'Mozilla/5.0 (Linux; Android 15; SAMSUNG SM-S921U) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/120.0.0.0 Mobile Safari/537.36',
+      expectedBrowserClass: 'mobile-browser-samsung-internet',
+    },
+    {
+      label: 'Firefox Android',
+      userAgent:
+        'Mozilla/5.0 (Android 15; Mobile; rv:138.0) Gecko/138.0 Firefox/138.0',
+      expectedBrowserClass: 'mobile-browser-firefox-android',
+    },
+    {
+      label: 'Edge Android',
+      userAgent:
+        'Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36 EdgA/136.0.0.0',
+      expectedBrowserClass: 'mobile-browser-edge-android',
+    },
+  ] as const;
+
+  it.each(popularMobileBrowsers)(
+    'applies mobile UX behavior for $label user agent even when media query reports desktop',
+    async ({ userAgent, expectedBrowserClass }) => {
+      mockUserAgent(userAgent);
+      mockMobileViewport(false);
+      render(<SearchInterface />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('search-ui-root')).toHaveClass('mobile-device');
+      });
+      expect(screen.getByTestId('search-ui-root')).toHaveClass(expectedBrowserClass);
+      expect(screen.getByTestId('sidebar')).toHaveClass('collapsed');
+      expect(screen.getByTestId('sidebar-backdrop')).not.toHaveClass('show');
+    },
+  );
 
   it('keeps the sidebar collapsed by default on mobile viewports', async () => {
     mockMobileViewport(true);
