@@ -625,23 +625,36 @@ async function uploadBinaryContextFileSmart(file: File): Promise<string> {
 
   try {
     return await uploadBinaryContextFile(file);
-  } catch (error) {
-    const message = error instanceof Error ? error.message.toLowerCase() : String(error || '').toLowerCase();
-    const shouldRetryChunked =
+  } catch (directUploadError) {
+    const message =
+      directUploadError instanceof Error ? directUploadError.message.toLowerCase() : String(directUploadError || '').toLowerCase();
+    const payloadRelatedFailure =
       message.includes('413') ||
       message.includes('payload too large') ||
       message.includes('request too large') ||
       message.includes('entity too large');
 
-    if (shouldRetryChunked) {
-      console.log('[UI] Direct binary upload hit payload limit; retrying with chunked upload', {
+    console.log(
+      payloadRelatedFailure
+        ? '[UI] Direct binary upload hit payload limit; retrying with chunked upload'
+        : '[UI] Direct binary upload failed; retrying with chunked upload fallback',
+      {
         name: file.name,
         size: file.size,
-      });
-      return uploadBinaryContextFileChunked(file);
-    }
+      },
+    );
 
-    throw error;
+    try {
+      return await uploadBinaryContextFileChunked(file);
+    } catch (chunkedUploadError) {
+      console.log('[UI] Chunked upload fallback also failed', {
+        name: file.name,
+        size: file.size,
+        directUploadError,
+        chunkedUploadError,
+      });
+      throw directUploadError;
+    }
   }
 }
 

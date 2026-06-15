@@ -554,6 +554,90 @@ describe('SearchInterface', () => {
     expect(directCalls).toHaveLength(0);
   });
 
+  it('falls back to chunked upload when direct PDF upload fails so files still reach /api/chat as file ids', async () => {
+    const user = userEvent.setup();
+    let partCounter = 0;
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload/chunked/init')) {
+        return {
+          ok: true,
+          json: async () => ({ uploadId: 'upload_retry_chunked_1' }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/part')) {
+        partCounter += 1;
+        return {
+          ok: true,
+          json: async () => ({ partId: `retry_part_${partCounter}` }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/complete')) {
+        return {
+          ok: true,
+          json: async () => ({ fileId: 'file_retry_chunked_final_1' }),
+        };
+      }
+
+      if (url.includes('/api/files/upload')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: 'Direct upload endpoint failed unexpectedly.' }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Recovered upload path', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const smallPdfBytes = new Uint8Array(512 * 1024);
+    const smallPdfFile = new File([smallPdfBytes], 'fallback-small.pdf', { type: 'application/pdf' });
+    await user.upload(screen.getByTestId('file-input'), smallPdfFile);
+    await user.type(screen.getByTestId('message-input'), 'Use fallback upload');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    const payload = JSON.parse(String(init.body));
+    expect(payload.files).toHaveLength(1);
+    expect(payload.files[0].name).toBe('fallback-small.pdf');
+    expect(payload.files[0].fileId).toBe('file_retry_chunked_final_1');
+
+    const directCalls = fetchMock.mock.calls.filter(
+      (call) =>
+        String(call[0]).includes('/api/files/upload') &&
+        !String(call[0]).includes('/api/files/upload/chunked/'),
+    );
+    const initCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/api/files/upload/chunked/init'));
+    const partCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/api/files/upload/chunked/part'));
+    const completeCalls = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes('/api/files/upload/chunked/complete'),
+    );
+
+    expect(directCalls).toHaveLength(1);
+    expect(initCalls).toHaveLength(1);
+    expect(partCalls.length).toBeGreaterThan(0);
+    expect(completeCalls).toHaveLength(1);
+  });
+
   it('does not apply a client-side cap to how many files can be attached in one message', async () => {
     const user = userEvent.setup();
     let uploadCounter = 0;
