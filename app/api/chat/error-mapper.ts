@@ -1,20 +1,32 @@
+type ChatApiError = {
+  status?: number;
+  message?: string;
+  error?: { message?: string; code?: string };
+};
+
+const AUTH_FAILURE_PATTERNS = ["unauthorized", "forbidden", "invalid api key", "access denied"] as const;
+const FILE_NOT_READY_PATTERNS = ["file_input_not_ready", "giving up on waiting for file"] as const;
+const DEPLOYMENT_FAILURE_PATTERNS = ["deployment", "not found"] as const;
+const API_VERSION_FAILURE_PATTERNS = ["api-version", "api version"] as const;
+const TOOLING_FAILURE_PATTERNS = ["web_search", "tool", "unsupported"] as const;
+
+function toLowerText(value: string | undefined): string {
+  return (value || "").toLowerCase();
+}
+
+function hasAnyPattern(text: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => text.includes(pattern));
+}
+
+function getMergedErrorMessage(error: ChatApiError): string {
+  return `${toLowerText(error.message)} ${toLowerText(error.error?.message)}`;
+}
+
 export function toUserFacingChatError(error: unknown): { error: string; recovery: string } {
-  const maybe = error as {
-    status?: number;
-    message?: string;
-    error?: { message?: string; code?: string };
-  };
+  const maybe = error as ChatApiError;
   const status = maybe?.status;
-  const lowerMessage = (maybe?.message || "").toLowerCase();
-  const lowerApiErrorMessage = (maybe?.error?.message || "").toLowerCase();
-  const merged = `${lowerMessage} ${lowerApiErrorMessage}`;
-  const isAuthFailure =
-    status === 401 ||
-    status === 403 ||
-    merged.includes("unauthorized") ||
-    merged.includes("forbidden") ||
-    merged.includes("invalid api key") ||
-    merged.includes("access denied");
+  const merged = getMergedErrorMessage(maybe);
+  const isAuthFailure = status === 401 || status === 403 || hasAnyPattern(merged, AUTH_FAILURE_PATTERNS);
 
   if (isAuthFailure) {
     return {
@@ -25,9 +37,7 @@ export function toUserFacingChatError(error: unknown): { error: string; recovery
   }
 
   const isFileNotReadyFailure =
-    merged.includes("file_input_not_ready") ||
-    merged.includes("giving up on waiting for file") ||
-    (merged.includes("file") && merged.includes("processing"));
+    hasAnyPattern(merged, FILE_NOT_READY_PATTERNS) || (merged.includes("file") && merged.includes("processing"));
   if (isFileNotReadyFailure) {
     return {
       error: "The uploaded file is still processing and could not be read yet.",
@@ -43,8 +53,7 @@ export function toUserFacingChatError(error: unknown): { error: string; recovery
     };
   }
 
-  const isDeploymentFailure =
-    status === 404 || merged.includes("deployment") || merged.includes("not found");
+  const isDeploymentFailure = status === 404 || hasAnyPattern(merged, DEPLOYMENT_FAILURE_PATTERNS);
   if (isDeploymentFailure) {
     return {
       error: "Azure OpenAI deployment was not found or is not available.",
@@ -53,7 +62,7 @@ export function toUserFacingChatError(error: unknown): { error: string; recovery
     };
   }
 
-  const isApiVersionFailure = merged.includes("api-version") || merged.includes("api version");
+  const isApiVersionFailure = hasAnyPattern(merged, API_VERSION_FAILURE_PATTERNS);
   if (isApiVersionFailure) {
     return {
       error: "Azure OpenAI API version is invalid for this endpoint or model.",
@@ -62,7 +71,7 @@ export function toUserFacingChatError(error: unknown): { error: string; recovery
     };
   }
 
-  const isToolingFailure = merged.includes("web_search") || merged.includes("tool") || merged.includes("unsupported");
+  const isToolingFailure = hasAnyPattern(merged, TOOLING_FAILURE_PATTERNS);
   if (isToolingFailure) {
     return {
       error: "The selected model/tool combination is not supported by this deployment.",

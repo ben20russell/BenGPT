@@ -2,6 +2,8 @@ import { AzureOpenAI } from "openai";
 
 export type UploadPurpose = "assistants" | "user_data";
 export const FILE_UPLOAD_PURPOSE_ORDER: UploadPurpose[] = ["user_data", "assistants"];
+const PURPOSE_INVALIDITY_PATTERNS = ["invalid", "unsupported", "not supported", "allowed"] as const;
+const PURPOSE_INVALID_CODE_PATTERNS = ["invalid", "unsupported", "not_allowed", "bad_request"] as const;
 
 export type FilesApi = {
   files: {
@@ -67,6 +69,10 @@ export function coerceMimeType(type: string | undefined): string {
   return normalized || "application/octet-stream";
 }
 
+function hasAnyPattern(text: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => text.includes(pattern));
+}
+
 export function isPurposeRejectedError(error: unknown): boolean {
   const maybe = error as {
     status?: number;
@@ -89,20 +95,11 @@ export function isPurposeRejectedError(error: unknown): boolean {
   }
 
   const mentionsPurpose = merged.includes("purpose");
-  const mentionsInvalidity =
-    merged.includes("invalid") ||
-    merged.includes("unsupported") ||
-    merged.includes("not supported") ||
-    merged.includes("allowed");
-  const codeSuggestsInvalidValue =
-    normalizedCode.includes("invalid") ||
-    normalizedCode.includes("unsupported") ||
-    normalizedCode.includes("not_allowed") ||
-    normalizedCode.includes("bad_request");
-
-  if (mentionsPurpose && (mentionsInvalidity || codeSuggestsInvalidValue)) {
-    return true;
+  if (!mentionsPurpose) {
+    return false;
   }
 
-  return mentionsPurpose && mentionsInvalidity;
+  const mentionsInvalidity = hasAnyPattern(merged, PURPOSE_INVALIDITY_PATTERNS);
+  const codeSuggestsInvalidValue = hasAnyPattern(normalizedCode, PURPOSE_INVALID_CODE_PATTERNS);
+  return mentionsInvalidity || codeSuggestsInvalidValue;
 }
