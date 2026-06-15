@@ -323,6 +323,32 @@ function describeReadinessIssueForContext(issue: UploadedFileReadinessIssue): st
   return "temporarily unavailable";
 }
 
+function isInputFileCompatibilityError(error: unknown): boolean {
+  const maybe = error as {
+    status?: number;
+    message?: string;
+    error?: { message?: string; code?: string };
+  };
+  const status = typeof maybe?.status === "number" ? maybe.status : undefined;
+  if (status !== undefined && status !== 400 && status !== 404 && status !== 422) {
+    return false;
+  }
+
+  const merged = `${String(maybe?.message || "")} ${String(maybe?.error?.message || "")}`.toLowerCase();
+  const mentionsInputFile =
+    merged.includes("input_file") ||
+    merged.includes("file_id") ||
+    merged.includes("attachments") ||
+    merged.includes("uploaded file");
+  const mentionsCompatibility =
+    merged.includes("unsupported") ||
+    merged.includes("not supported") ||
+    merged.includes("invalid") ||
+    merged.includes("unknown");
+
+  return mentionsInputFile && mentionsCompatibility;
+}
+
 async function waitForUploadedFilesToBeReady(
   client: FilesReadinessApi,
   files: UploadedFileDescriptor[],
@@ -903,7 +929,55 @@ export async function POST(req: NextRequest) {
         fallbackRequest.tools = preset.tools;
       }
 
-      response = await (client as unknown as ResponsesApi).responses.create(fallbackRequest);
+      try {
+        response = await (client as unknown as ResponsesApi).responses.create(fallbackRequest);
+      } catch (fallbackError) {
+        const shouldRetryTextOnlyFiles = hasAttachedInputFiles && isInputFileCompatibilityError(fallbackError);
+        if (!shouldRetryTextOnlyFiles) {
+          throw fallbackError;
+        }
+
+        const attachmentNames = files.map((file, index) => {
+          const fallbackName = `document-${index + 1}`;
+          const name = String(file.name || "").trim();
+          return name || fallbackName;
+        });
+        const textOnlyAttachmentFallbackNotice = [
+          "Attachment fallback notice:",
+          "- Uploaded file references could not be attached for parsing in this deployment.",
+          "- Do not assume direct access to the uploaded files for this response.",
+          "Unavailable uploaded files:",
+          ...attachmentNames.map((name) => `- ${name}`),
+        ].join("\n");
+        const textOnlyInputMessage: ResponseInputMessage = {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: [composedInput, textOnlyAttachmentFallbackNotice].join("\n\n"),
+            },
+          ],
+        };
+
+        console.log("[/api/chat] Retrying without input_file attachments after compatibility rejection", {
+          searchMode,
+          status: (fallbackError as { status?: number })?.status,
+          message: (fallbackError as { message?: string })?.message,
+          unavailableAttachmentCount: attachmentNames.length,
+        });
+
+        const textOnlyRequest: ChatResponsesRequest = {
+          model: config.deployment,
+          instructions,
+          input: [textOnlyInputMessage],
+        };
+        if (fallbackRequest.tools) {
+          textOnlyRequest.tools = fallbackRequest.tools;
+        }
+
+        response = await (client as unknown as ResponsesApi).responses.create(textOnlyRequest);
+      }
     }
 
     const citations =

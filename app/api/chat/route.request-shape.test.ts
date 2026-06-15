@@ -551,6 +551,63 @@ describe("POST /api/chat request shape", () => {
     });
   });
 
+  it("falls back to text-only file notes when deployment rejects input_file attachments on all retries", async () => {
+    responsesCreateSpy.mockImplementation(async (request: {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+      tools?: unknown[];
+    }) => {
+      const hasInputFile = Boolean(
+        request.input?.[0]?.content?.some((item) => item.type === "input_file"),
+      );
+      if (hasInputFile) {
+        throw {
+          status: 400,
+          message: "input_file is not supported by this deployment",
+        };
+      }
+      return {
+        output_text: "Recovered via text-only attachment fallback",
+        output: [],
+      };
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Analyze this file despite deployment constraints",
+        mode: "web_search",
+        files: [
+          {
+            name: "unsupported-input-file.pdf",
+            type: "application/pdf",
+            size: 2345,
+            contentKind: "binary",
+            fileId: "file_input_not_supported_1",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(3);
+
+    const thirdCall = responsesCreateSpy.mock.calls[2]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const thirdContent = thirdCall.input?.[0]?.content || [];
+    const thirdInputFile = thirdContent.find((item) => item.type === "input_file");
+    const thirdInputText = String(thirdContent.find((item) => item.type === "input_text")?.text || "");
+
+    expect(thirdInputFile).toBeUndefined();
+    expect(thirdInputText.toLowerCase()).toContain("uploaded file references could not be attached");
+    expect(thirdInputText.toLowerCase()).toContain("unsupported-input-file.pdf");
+  });
+
   it("does not force web_search tool usage when files are attached", async () => {
     responsesCreateSpy.mockResolvedValue({
       output_text: "Used attached file content",
