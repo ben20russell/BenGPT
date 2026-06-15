@@ -307,6 +307,7 @@ describe('SearchInterface', () => {
     expect(screen.getByTestId('tools-add-btn')).toBeInTheDocument();
     expect(screen.getByTestId('tools-preferences-btn')).toBeInTheDocument();
     expect(screen.getByTestId('tools-reasoning-btn')).toBeInTheDocument();
+    expect(screen.queryByTestId('composer-reasoning-label')).not.toBeInTheDocument();
     expect(screen.queryByTestId('tools-dropdown-btn')).not.toBeInTheDocument();
     expect(screen.queryByTestId('pro-mode-btn')).not.toBeInTheDocument();
     expect(screen.queryByTestId('voice-input-btn')).not.toBeInTheDocument();
@@ -351,8 +352,11 @@ describe('SearchInterface', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<SearchInterface />);
 
+    expect(screen.getByTestId('tools-reasoning-btn')).toHaveTextContent('Auto');
+
     await user.click(screen.getByTestId('tools-reasoning-btn'));
     await user.click(screen.getByTestId('reasoning-intensity-option-low'));
+    expect(screen.getByTestId('tools-reasoning-btn')).toHaveTextContent('Low');
     await user.type(screen.getByTestId('message-input'), 'Use lower reasoning');
     await user.click(screen.getByTestId('send-btn'));
 
@@ -366,6 +370,28 @@ describe('SearchInterface', () => {
       query: 'Use lower reasoning',
       mode: 'web_search',
       reasoningIntensity: 'low',
+    });
+  });
+
+  it('restores the most recently used search mode and reasoning after remount', async () => {
+    const user = userEvent.setup();
+    const firstRender = render(<SearchInterface />);
+
+    await user.click(screen.getByTestId('tools-preferences-btn'));
+    await user.click(screen.getByTestId('search-mode-option-deep_research'));
+    expect(screen.getByTestId('composer-mode-label')).toHaveTextContent('Deep Research');
+
+    await user.click(screen.getByTestId('tools-reasoning-btn'));
+    await user.click(screen.getByTestId('reasoning-intensity-option-high'));
+    expect(screen.getByTestId('tools-reasoning-btn')).toHaveTextContent('High');
+
+    firstRender.unmount();
+
+    render(<SearchInterface />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('composer-mode-label')).toHaveTextContent('Deep Research');
+      expect(screen.getByTestId('tools-reasoning-btn')).toHaveTextContent('High');
     });
   });
 
@@ -1074,6 +1100,81 @@ describe('SearchInterface', () => {
       expect(screen.getByTestId('message-input')).toHaveAttribute('rows', '1');
       expect(screen.getByTestId('message-input')).toHaveClass('compact');
       expect(messagesWrap.scrollTop).toBe(0);
+    });
+  });
+
+  it('shows a results-only expanded view and restores layout from the same expand icon', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ answer: 'Expanded answer', citations: [] }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Show expanded mode');
+    await user.click(screen.getByTestId('send-btn'));
+    expect(await screen.findByText('Expanded answer')).toBeInTheDocument();
+
+    expect(screen.getByTestId('app-header')).toBeInTheDocument();
+    expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+    expect(screen.getByTestId('topbar')).toBeInTheDocument();
+    expect(screen.getByTestId('input-area')).toBeInTheDocument();
+    expect(screen.getByTestId('page-bottom-anchor')).toBeInTheDocument();
+    expect(screen.getByTestId('expand-results-btn')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('expand-results-btn'));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('app-header')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('topbar')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('input-area')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('page-bottom-anchor')).not.toBeInTheDocument();
+      expect(screen.getByTestId('expand-results-btn')).toBeInTheDocument();
+      expect(screen.getByText('Expanded answer')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByTestId('expand-results-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('app-header')).toBeInTheDocument();
+      expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+      expect(screen.getByTestId('topbar')).toBeInTheDocument();
+      expect(screen.getByTestId('input-area')).toBeInTheDocument();
+      expect(screen.getByTestId('page-bottom-anchor')).toBeInTheDocument();
+      expect(screen.getByTestId('expand-results-btn')).toBeInTheDocument();
+    });
+  });
+
+  it('still restores layout on Escape while in expanded view', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ answer: 'Expanded answer', citations: [] }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Show expanded mode');
+    await user.click(screen.getByTestId('send-btn'));
+    expect(await screen.findByText('Expanded answer')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('expand-results-btn'));
+    await waitFor(() => {
+      expect(screen.queryByTestId('app-header')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('topbar')).not.toBeInTheDocument();
+      expect(screen.getByTestId('expand-results-btn')).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('app-header')).toBeInTheDocument();
+      expect(screen.getByTestId('topbar')).toBeInTheDocument();
+      expect(screen.getByTestId('expand-results-btn')).toBeInTheDocument();
     });
   });
 

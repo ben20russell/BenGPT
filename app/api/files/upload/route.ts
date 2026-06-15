@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAzureClient, type FilesApi, getAzureConfig } from "./_lib";
+import {
+  createAzureClient,
+  FILE_UPLOAD_PURPOSE_ORDER,
+  getAzureConfig,
+  isPurposeRejectedError,
+  type FilesApi,
+  type UploadPurpose,
+} from "./_lib";
 
 export const runtime = "nodejs";
 
@@ -54,10 +61,29 @@ export async function POST(req: NextRequest) {
     });
 
     const client = createAzureClient(config);
-    const uploaded = await (client as unknown as FilesApi).files.create({
-      file: fileField,
-      purpose: "assistants",
-    });
+    let uploaded: { id?: string } | null = null;
+    let selectedPurpose: UploadPurpose | null = null;
+    for (const purpose of FILE_UPLOAD_PURPOSE_ORDER) {
+      try {
+        uploaded = await (client as unknown as FilesApi).files.create({
+          file: fileField,
+          purpose,
+        });
+        selectedPurpose = purpose;
+        break;
+      } catch (error) {
+        const shouldFallback = purpose === "user_data" && isPurposeRejectedError(error);
+        if (!shouldFallback) {
+          throw error;
+        }
+        console.log("[/api/files/upload] user_data purpose rejected by deployment; retrying with assistants", {
+          name: fileField.name,
+          size: fileField.size,
+          type: fileField.type,
+          error,
+        });
+      }
+    }
 
     const fileId = typeof uploaded?.id === "string" ? uploaded.id : "";
     if (!fileId) {
@@ -76,6 +102,7 @@ export async function POST(req: NextRequest) {
       size: fileField.size,
       type: fileField.type,
       fileId,
+      purpose: selectedPurpose,
     });
 
     return NextResponse.json({

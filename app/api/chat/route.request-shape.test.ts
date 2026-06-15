@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const responsesCreateSpy = vi.fn();
+const filesWaitForProcessingSpy = vi.fn();
 const { readFileMock, appendFileMock, execFileMock } = vi.hoisted(() => ({
   readFileMock: vi.fn(),
   appendFileMock: vi.fn(),
@@ -23,6 +24,9 @@ vi.mock("openai", () => {
     responses = {
       create: responsesCreateSpy,
     };
+    files = {
+      waitForProcessing: filesWaitForProcessingSpy,
+    };
   }
 
   return { AzureOpenAI };
@@ -33,6 +37,7 @@ import { POST } from "./route";
 describe("POST /api/chat request shape", () => {
   beforeEach(() => {
     responsesCreateSpy.mockReset();
+    filesWaitForProcessingSpy.mockReset();
     readFileMock.mockReset();
     appendFileMock.mockReset();
     execFileMock.mockReset();
@@ -43,6 +48,10 @@ describe("POST /api/chat request shape", () => {
         callback(null, JSON.stringify({ chunks: [] }));
       },
     );
+    filesWaitForProcessingSpy.mockResolvedValue({
+      id: "file_ready_1",
+      status: "processed",
+    });
     process.env.AZURE_OPENAI_API_KEY = "test-key";
     process.env.AZURE_OPENAI_ENDPOINT = "https://example.cognitiveservices.azure.com";
     process.env.AZURE_OPENAI_DEPLOYMENT = "ben-gpt-5.4";
@@ -320,6 +329,13 @@ describe("POST /api/chat request shape", () => {
     const res = await POST(req as never);
     expect(res.status).toBe(200);
     expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+    expect(filesWaitForProcessingSpy).toHaveBeenCalledWith(
+      "file_pdf_123",
+      expect.objectContaining({
+        pollInterval: expect.any(Number),
+        maxWait: expect.any(Number),
+      }),
+    );
 
     const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
       input?: Array<{ content?: Array<Record<string, unknown>> }>;
@@ -334,6 +350,41 @@ describe("POST /api/chat request shape", () => {
       filename: "sample.pdf",
     });
     expect(inputFile).not.toHaveProperty("file_data");
+  });
+
+  it("returns 500 when uploaded file is not ready in time for parsing", async () => {
+    filesWaitForProcessingSpy.mockRejectedValue(new Error("Giving up on waiting for file file_pdf_slow to finish processing"));
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "should-not-run",
+      output: [],
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Analyze this PDF",
+        files: [
+          {
+            name: "slow.pdf",
+            type: "application/pdf",
+            size: 7777,
+            contentKind: "binary",
+            fileId: "file_pdf_slow",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+    const body = (await res.json()) as { error?: string; recovery?: string };
+
+    expect(res.status).toBe(500);
+    expect(responsesCreateSpy).not.toHaveBeenCalled();
+    expect(String(body.error || "").toLowerCase()).toContain("file");
+    expect(String(body.recovery || "").toLowerCase()).toContain("upload");
   });
 
   it("normalizes raw base64 PDF bytes into a data URL when file_data is used", async () => {
@@ -428,6 +479,52 @@ describe("POST /api/chat request shape", () => {
       type: "input_file",
       file_id: "file_report_001",
       filename: "report.pdf",
+    });
+  });
+
+  it("returns normalized token usage from response.usage", async () => {
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "ok",
+      output: [],
+      usage: {
+        input_tokens: 210,
+        output_tokens: 78,
+        total_tokens: 288,
+        output_tokens_details: {
+          reasoning_tokens: 31,
+        },
+        input_tokens_details: {
+          cached_tokens: 19,
+        },
+      },
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query: "Show exact usage", mode: "thinking" }),
+    });
+
+    const res = await POST(req as never);
+    const body = (await res.json()) as {
+      usage?: {
+        inputTokens?: number | null;
+        outputTokens?: number | null;
+        totalTokens?: number | null;
+        reasoningTokens?: number | null;
+        cachedInputTokens?: number | null;
+      };
+    };
+
+    expect(res.status).toBe(200);
+    expect(body.usage).toEqual({
+      inputTokens: 210,
+      outputTokens: 78,
+      totalTokens: 288,
+      reasoningTokens: 31,
+      cachedInputTokens: 19,
     });
   });
 });

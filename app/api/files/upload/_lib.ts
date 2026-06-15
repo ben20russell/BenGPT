@@ -1,8 +1,11 @@
 import { AzureOpenAI } from "openai";
 
+export type UploadPurpose = "assistants" | "user_data";
+export const FILE_UPLOAD_PURPOSE_ORDER: UploadPurpose[] = ["user_data", "assistants"];
+
 export type FilesApi = {
   files: {
-    create: (params: { file: File; purpose: "assistants" | "user_data" }) => Promise<{ id?: string }>;
+    create: (params: { file: File; purpose: UploadPurpose }) => Promise<{ id?: string }>;
   };
 };
 
@@ -12,7 +15,7 @@ export type UploadsApi = {
       bytes: number;
       filename: string;
       mime_type: string;
-      purpose: "assistants" | "user_data";
+      purpose: UploadPurpose;
     }) => Promise<{ id?: string }>;
     complete: (uploadId: string, params: { part_ids: string[] }) => Promise<{ file?: { id?: string } | null }>;
     parts: {
@@ -62,4 +65,22 @@ export function coerceSafeFilename(name: string | undefined, fallback = "upload.
 export function coerceMimeType(type: string | undefined): string {
   const normalized = String(type || "").trim().slice(0, 120);
   return normalized || "application/octet-stream";
+}
+
+export function isPurposeRejectedError(error: unknown): boolean {
+  const maybe = error as {
+    status?: number;
+    message?: string;
+    error?: { message?: string; code?: string };
+  };
+  const status = typeof maybe?.status === "number" ? maybe.status : undefined;
+  const merged = `${String(maybe?.message || "")} ${String(maybe?.error?.message || "")}`.toLowerCase();
+  if (status !== 400 && status !== 422) return false;
+  const mentionsPurpose = merged.includes("purpose");
+  const mentionsInvalidity =
+    merged.includes("invalid") ||
+    merged.includes("unsupported") ||
+    merged.includes("not supported") ||
+    merged.includes("allowed");
+  return mentionsPurpose && mentionsInvalidity;
 }

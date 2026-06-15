@@ -64,6 +64,49 @@ describe("POST /api/files/upload", () => {
     expect(filesCreateSpy).toHaveBeenCalledTimes(1);
     expect(filesCreateSpy).toHaveBeenCalledWith(
       expect.objectContaining({
+        purpose: "user_data",
+      }),
+    );
+  });
+
+  it("falls back to assistants purpose when user_data purpose is rejected", async () => {
+    filesCreateSpy
+      .mockRejectedValueOnce({
+        status: 400,
+        message: "Invalid value for purpose",
+      })
+      .mockResolvedValueOnce({
+        id: "file_pdf_uploaded_456",
+      });
+
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], "fallback.pdf", {
+        type: "application/pdf",
+      }),
+    );
+
+    const req = new Request("http://localhost/api/files/upload", {
+      method: "POST",
+      body: formData,
+    });
+
+    const res = await POST(req as never);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.fileId).toBe("file_pdf_uploaded_456");
+    expect(filesCreateSpy).toHaveBeenCalledTimes(2);
+    expect(filesCreateSpy).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        purpose: "user_data",
+      }),
+    );
+    expect(filesCreateSpy).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
         purpose: "assistants",
       }),
     );

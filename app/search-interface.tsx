@@ -40,6 +40,82 @@ const DIRECT_UPLOAD_PREFERENCE_BYTES = 4 * 1024 * 1024;
 const CHUNKED_UPLOAD_PART_BYTES = 3 * 1024 * 1024;
 const MAX_PARALLEL_FILE_UPLOADS = 2;
 const FILE_UPLOAD_SUCCESS_NOTE = 'Uploaded to files API and attached by file_id.';
+const DEFAULT_SEARCH_MODE: SearchMode = 'web_search';
+const DEFAULT_REASONING_INTENSITY: ReasoningIntensity = 'auto';
+const COMPOSER_PREFERENCES_STORAGE_KEY = 'beacon-search-composer-preferences:v1';
+
+type PersistedComposerPreferences = {
+  searchMode?: SearchMode;
+  reasoningIntensity?: ReasoningIntensity;
+  updatedAt?: string;
+};
+
+type ResolvedComposerPreferences = {
+  searchMode: SearchMode;
+  reasoningIntensity: ReasoningIntensity;
+  updatedAt?: string;
+  source: 'defaults' | 'storage';
+};
+
+function isSearchMode(value: unknown): value is SearchMode {
+  return value === 'web_search' || value === 'thinking' || value === 'deep_research';
+}
+
+function isReasoningIntensity(value: unknown): value is ReasoningIntensity {
+  return value === 'auto' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh';
+}
+
+function resolveInitialComposerPreferences(): ResolvedComposerPreferences {
+  const fallback: ResolvedComposerPreferences = {
+    searchMode: DEFAULT_SEARCH_MODE,
+    reasoningIntensity: DEFAULT_REASONING_INTENSITY,
+    source: 'defaults',
+  };
+
+  if (typeof window === 'undefined') {
+    return fallback;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(COMPOSER_PREFERENCES_STORAGE_KEY);
+    if (!raw) {
+      console.log('[UI] No saved composer preferences found; using defaults', {
+        searchMode: fallback.searchMode,
+        reasoningIntensity: fallback.reasoningIntensity,
+      });
+      return fallback;
+    }
+
+    const parsed = JSON.parse(raw) as PersistedComposerPreferences;
+    const parsedSearchMode = parsed.searchMode;
+    const parsedReasoningIntensity = parsed.reasoningIntensity;
+    const hasValidSearchMode = isSearchMode(parsedSearchMode);
+    const hasValidReasoningIntensity = isReasoningIntensity(parsedReasoningIntensity);
+    const resolved: ResolvedComposerPreferences = {
+      searchMode: hasValidSearchMode ? parsedSearchMode : DEFAULT_SEARCH_MODE,
+      reasoningIntensity: hasValidReasoningIntensity ? parsedReasoningIntensity : DEFAULT_REASONING_INTENSITY,
+      updatedAt: parsed.updatedAt,
+      source: 'storage',
+    };
+
+    if (!hasValidSearchMode || !hasValidReasoningIntensity) {
+      console.log('[UI] Saved composer preferences were partially invalid; applying safe defaults', {
+        parsed,
+        resolved,
+      });
+    }
+
+    console.log('[UI] Restored composer preferences from local storage', {
+      searchMode: resolved.searchMode,
+      reasoningIntensity: resolved.reasoningIntensity,
+      updatedAt: resolved.updatedAt,
+    });
+    return resolved;
+  } catch (error) {
+    console.log('[UI] Failed to restore composer preferences from local storage; using defaults', { error });
+    return fallback;
+  }
+}
 
 function detectMobileViewport(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -125,6 +201,14 @@ function initializeDeviceId(): string {
 type Citation = {
   url?: string;
   title?: string;
+};
+
+type TokenUsageSummary = {
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  reasoningTokens?: number | null;
+  cachedInputTokens?: number | null;
 };
 
 type UploadedContextFile = {
@@ -919,6 +1003,7 @@ export default function SearchInterface() {
   const [isUiBooted, setIsUiBooted] = useState(process.env.NODE_ENV === 'test');
   const [deviceId] = useState(initializeDeviceId);
   const [recentsHydrated, setRecentsHydrated] = useState(false);
+  const initialComposerPreferences = useMemo(() => resolveInitialComposerPreferences(), []);
 
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
   const [isMobileUserAgent] = useState(detectMobileUserAgent);
@@ -941,10 +1026,13 @@ export default function SearchInterface() {
   const [gitSnippets, setGitSnippets] = useState<GitCodeContext[]>([]);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const [toolsMenuType, setToolsMenuType] = useState<'add' | 'preferences' | 'reasoning'>('add');
-  const [searchMode, setSearchMode] = useState<SearchMode>('web_search');
-  const [reasoningIntensity, setReasoningIntensity] = useState<ReasoningIntensity>('auto');
+  const [searchMode, setSearchMode] = useState<SearchMode>(initialComposerPreferences.searchMode);
+  const [reasoningIntensity, setReasoningIntensity] = useState<ReasoningIntensity>(
+    initialComposerPreferences.reasoningIntensity,
+  );
   const [useMemory, setUseMemory] = useState(true);
   const [welcomeSuggestions, setWelcomeSuggestions] = useState<string[]>(FALLBACK_WELCOME_SUGGESTIONS);
+  const [isResultsExpanded, setIsResultsExpanded] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const previousSearchingRef = useRef(false);
@@ -954,7 +1042,13 @@ export default function SearchInterface() {
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const isMobileLayout = isMobileViewport || isMobileUserAgent;
   const mobileBrowserClass = mobileBrowser === 'unknown' ? '' : `mobile-browser-${mobileBrowser}`;
-  const uiRootClassName = ['search-ui', isUiBooted ? 'booted' : 'booting', isMobileLayout ? 'mobile-device' : '', mobileBrowserClass]
+  const uiRootClassName = [
+    'search-ui',
+    isUiBooted ? 'booted' : 'booting',
+    isMobileLayout ? 'mobile-device' : '',
+    mobileBrowserClass,
+    isResultsExpanded ? 'results-expanded' : '',
+  ]
     .filter(Boolean)
     .join(' ');
 
@@ -1001,6 +1095,41 @@ export default function SearchInterface() {
       mobileBrowser: nextMobileBrowser,
     });
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const payload: PersistedComposerPreferences = {
+      searchMode,
+      reasoningIntensity,
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      window.localStorage.setItem(COMPOSER_PREFERENCES_STORAGE_KEY, JSON.stringify(payload));
+      console.log('[UI] Saved composer preferences to local storage', payload);
+    } catch (error) {
+      console.log('[UI] Failed to save composer preferences to local storage', {
+        payload,
+        error,
+      });
+    }
+  }, [searchMode, reasoningIntensity]);
+
+  useEffect(() => {
+    if (!isResultsExpanded) return;
+
+    function onWindowKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return;
+      console.log('[UI] Results expanded view disabled', { source: 'escape' });
+      setIsResultsExpanded(false);
+    }
+
+    window.addEventListener('keydown', onWindowKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onWindowKeyDown);
+    };
+  }, [isResultsExpanded]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
@@ -1268,6 +1397,7 @@ export default function SearchInterface() {
 
   function startNewChat() {
     console.log('[UI] Starting a new chat');
+    setIsResultsExpanded(false);
     setActiveConversationId(null);
     setInput('');
     setPendingTurnId(null);
@@ -1547,6 +1677,18 @@ export default function SearchInterface() {
   function showReasoningMenu() {
     setToolsMenuType('reasoning');
     setToolsMenuOpen((prev) => (toolsMenuType === 'reasoning' ? !prev : true));
+  }
+
+  function enterResultsExpandedView() {
+    console.log('[UI] Results expanded view enabled');
+    setToolsMenuOpen(false);
+    setMobileRecentsMenuOpen(false);
+    setIsResultsExpanded(true);
+  }
+
+  function exitResultsExpandedView(source: 'escape' | 'button') {
+    console.log('[UI] Results expanded view disabled', { source });
+    setIsResultsExpanded(false);
   }
 
   function insertActionableNextStep(step: string) {
@@ -1847,7 +1989,7 @@ export default function SearchInterface() {
       });
 
       const json = (await response.json().catch(() => null)) as
-        | { answer?: string; citations?: Citation[]; error?: string; recovery?: string }
+        | { answer?: string; citations?: Citation[]; usage?: TokenUsageSummary | null; error?: string; recovery?: string }
         | null;
 
       if (!response.ok) {
@@ -1863,6 +2005,14 @@ export default function SearchInterface() {
 
       const answer = json?.answer ?? '';
       const citations = Array.isArray(json?.citations) ? json?.citations : [];
+      const usage = json?.usage && typeof json.usage === 'object' ? json.usage : null;
+
+      if (usage) {
+        console.log('[UI] /api/chat token usage', {
+          mode: searchMode,
+          usage,
+        });
+      }
 
       setSearching(false);
       await streamLikeUpdate(turnId, answer);
@@ -1889,6 +2039,7 @@ export default function SearchInterface() {
         turnId,
         answerLength: answer.length,
         citationCount: citations.length,
+        usage,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error';
@@ -2126,76 +2277,122 @@ export default function SearchInterface() {
     <UIErrorBoundary>
       <div className={uiRootClassName} data-testid="search-ui-root">
         <div id="app" data-testid="app-root">
-          <header id="app-header" data-testid="app-header">
-            <div className="app-header-inner">
-              <Link
-                href="/"
-                className="brand-home-link"
-                data-testid="brand-home-link"
-                onClick={onBrandNewChatClick}
-              >
-                <div className="brand-mark" data-testid="brand-mark">
-                  <Image src="/lighthouse.svg" alt="Beacon Search lighthouse logo" width={30} height={30} />
-                </div>
-                <h1>Beacon Search AI</h1>
-              </Link>
-            </div>
-          </header>
+          {!isResultsExpanded ? (
+            <header id="app-header" data-testid="app-header">
+              <div className="app-header-inner">
+                <Link
+                  href="/"
+                  className="brand-home-link"
+                  data-testid="brand-home-link"
+                  onClick={onBrandNewChatClick}
+                >
+                  <div className="brand-mark" data-testid="brand-mark">
+                    <Image src="/lighthouse.svg" alt="Beacon Search lighthouse logo" width={30} height={30} />
+                  </div>
+                  <h1>Beacon Search AI</h1>
+                </Link>
+              </div>
+            </header>
+          ) : null}
 
-          {!isMobileLayout ? (
+          {!isResultsExpanded && !isMobileLayout ? (
             <aside id="sidebar" data-testid="sidebar">
               {renderRecentsPanel()}
             </aside>
           ) : null}
-          <button
-            type="button"
-            id="mobile-recents-backdrop"
-            className={mobileRecentsMenuOpen && isMobileLayout ? 'show' : ''}
-            data-testid="mobile-recents-backdrop"
-            aria-hidden={!(mobileRecentsMenuOpen && isMobileLayout)}
-            tabIndex={mobileRecentsMenuOpen && isMobileLayout ? 0 : -1}
-            onClick={() => {
-              console.log('[UI] Mobile recents menu backdrop clicked');
-              setMobileRecentsMenuOpen(false);
-            }}
-          />
+          {!isResultsExpanded ? (
+            <button
+              type="button"
+              id="mobile-recents-backdrop"
+              className={mobileRecentsMenuOpen && isMobileLayout ? 'show' : ''}
+              data-testid="mobile-recents-backdrop"
+              aria-hidden={!(mobileRecentsMenuOpen && isMobileLayout)}
+              tabIndex={mobileRecentsMenuOpen && isMobileLayout ? 0 : -1}
+              onClick={() => {
+                console.log('[UI] Mobile recents menu backdrop clicked');
+                setMobileRecentsMenuOpen(false);
+              }}
+            />
+          ) : null}
 
           <main id="main">
-            <div id="topbar">
-              {isMobileLayout ? (
-                <button
-                  id="sidebar-toggle"
-                  data-testid="sidebar-toggle"
-                  type="button"
-                  aria-label="Open recent chats menu"
-                  aria-expanded={mobileRecentsMenuOpen}
-                  onClick={() => {
-                    const nextOpen = !mobileRecentsMenuOpen;
-                    console.log('[UI] Mobile recents menu toggle clicked', { nextOpen });
-                    setMobileRecentsMenuOpen(nextOpen);
-                  }}
-                >
-                  ☰
-                </button>
-              ) : null}
-              <span id="chat-title" data-testid="chat-title">
-                {activeConversation?.title ?? 'New chat'}
-              </span>
-              {hasResults ? (
-                <button
-                  type="button"
-                  className="top-action-btn"
-                  data-testid="pdf-export-btn"
-                  onClick={exportConversationToPdf}
-                >
-                  Export PDF
-                </button>
-              ) : null}
-            </div>
-            {isMobileLayout && mobileRecentsMenuOpen ? (
+            {!isResultsExpanded ? (
+              <div id="topbar" data-testid="topbar">
+                {isMobileLayout ? (
+                  <button
+                    id="sidebar-toggle"
+                    data-testid="sidebar-toggle"
+                    type="button"
+                    aria-label="Open recent chats menu"
+                    aria-expanded={mobileRecentsMenuOpen}
+                    onClick={() => {
+                      const nextOpen = !mobileRecentsMenuOpen;
+                      console.log('[UI] Mobile recents menu toggle clicked', { nextOpen });
+                      setMobileRecentsMenuOpen(nextOpen);
+                    }}
+                  >
+                    ☰
+                  </button>
+                ) : null}
+                <span id="chat-title" data-testid="chat-title">
+                  {activeConversation?.title ?? 'New chat'}
+                </span>
+                {hasResults ? (
+                  <button
+                    type="button"
+                    className="top-action-btn expand-view-btn"
+                    data-testid="expand-results-btn"
+                    aria-label="Expanded view"
+                    title="Expanded view"
+                    onClick={enterResultsExpandedView}
+                  >
+                    <Image
+                      src="/expand-view-corners.svg"
+                      alt=""
+                      aria-hidden="true"
+                      width={20}
+                      height={20}
+                      className="expand-view-icon"
+                    />
+                    <span className="sr-only">Expanded View</span>
+                  </button>
+                ) : null}
+                {hasResults ? (
+                  <button
+                    type="button"
+                    className="top-action-btn"
+                    data-testid="pdf-export-btn"
+                    onClick={exportConversationToPdf}
+                  >
+                    Export PDF
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {!isResultsExpanded && isMobileLayout && mobileRecentsMenuOpen ? (
               <div id="mobile-recents-menu" data-testid="mobile-recents-menu">
                 {renderRecentsPanel()}
               </div>
+            ) : null}
+            {isResultsExpanded && hasResults ? (
+              <button
+                type="button"
+                className="top-action-btn expand-view-btn results-expanded-toggle"
+                data-testid="expand-results-btn"
+                aria-label="Return to original view"
+                title="Return to original view"
+                onClick={() => exitResultsExpandedView('button')}
+              >
+                <Image
+                  src="/expand-view-corners.svg"
+                  alt=""
+                  aria-hidden="true"
+                  width={20}
+                  height={20}
+                  className="expand-view-icon"
+                />
+                <span className="sr-only">Return to original view</span>
+              </button>
             ) : null}
 
             {!activeConversation || activeConversation.turns.length === 0 ? (
@@ -2298,8 +2495,9 @@ export default function SearchInterface() {
               </div>
             )}
 
-            <div id="input-area">
-              <div id="input-wrapper">
+            {!isResultsExpanded ? (
+              <div id="input-area" data-testid="input-area">
+                <div id="input-wrapper">
                 <input
                   ref={fileInputRef}
                   data-testid="file-input"
@@ -2403,23 +2601,20 @@ export default function SearchInterface() {
                     </button>
                     <button
                       type="button"
-                      className="tool-circle-btn"
+                      className="tool-circle-btn tool-reasoning-btn"
                       data-testid="tools-reasoning-btn"
-                      aria-label="Open reasoning menu"
+                      aria-label={`Open reasoning menu. Current level: ${getReasoningLabel(reasoningIntensity)}`}
                       title="Reasoning"
                       aria-haspopup="menu"
                       aria-expanded={toolsMenuOpen}
                       onClick={showReasoningMenu}
                     >
                       <span className="reasoning-glyph" aria-hidden="true">
-                        R
+                        {getReasoningLabel(reasoningIntensity)}
                       </span>
                     </button>
                     <span className="composer-mode-label" data-testid="composer-mode-label">
                       {getModeLabel(searchMode)}
-                    </span>
-                    <span className="composer-reasoning-label" data-testid="composer-reasoning-label">
-                      {getReasoningLabel(reasoningIntensity)}
                     </span>
                     {toolsMenuOpen ? (
                       <div className="tool-dropdown-menu" data-testid="tools-dropdown-menu" role="menu">
@@ -2537,12 +2732,15 @@ export default function SearchInterface() {
                     </button>
                   </div>
                 </div>
+                </div>
+                <p className="subheader-copy text-xs text-zinc-400 text-center mt-2">
+                  AI models can make mistakes. Always double check your work. Remember to think critically.
+                </p>
               </div>
-              <p className="subheader-copy text-xs text-zinc-400 text-center mt-2">
-                AI models can make mistakes. Always double check your work. Remember to think critically.
-              </p>
-            </div>
-            <a id="page-bottom-anchor" data-testid="page-bottom-anchor" href="#page-bottom-anchor" aria-label="Bottom of page" />
+            ) : null}
+            {!isResultsExpanded ? (
+              <a id="page-bottom-anchor" data-testid="page-bottom-anchor" href="#page-bottom-anchor" aria-label="Bottom of page" />
+            ) : null}
           </main>
         </div>
 
@@ -2591,6 +2789,9 @@ export default function SearchInterface() {
           overflow: hidden;
           padding-top: calc(56px + env(safe-area-inset-top, 0px));
           position: relative;
+        }
+        .search-ui.results-expanded #app {
+          padding-top: 0;
         }
         #app-header {
           position: fixed;
@@ -2781,6 +2982,38 @@ export default function SearchInterface() {
           cursor: pointer;
         }
         .top-action-btn:hover { border-color: #d1d5db; background: #f9fafb; color: var(--text-primary); }
+        .expand-view-btn {
+          width: 34px;
+          height: 34px;
+          border-radius: 10px;
+          padding: 0;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .expand-view-icon {
+          width: 20px;
+          height: 20px;
+        }
+        .results-expanded-toggle {
+          position: fixed;
+          top: calc(12px + env(safe-area-inset-top, 0px));
+          right: 16px;
+          z-index: 60;
+          background: rgba(255, 255, 255, 0.95);
+          backdrop-filter: blur(2px);
+        }
+        .sr-only {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          padding: 0;
+          margin: -1px;
+          overflow: hidden;
+          clip: rect(0, 0, 0, 0);
+          white-space: nowrap;
+          border: 0;
+        }
 
         #welcome {
           flex: 1;
@@ -3084,16 +3317,6 @@ export default function SearchInterface() {
           margin-left: 2px;
           user-select: none;
         }
-        .composer-reasoning-label {
-          font-size: 14px;
-          color: #475569;
-          line-height: 1;
-          padding: 4px 8px;
-          border: 1px solid #e5e7eb;
-          border-radius: 999px;
-          background: #f8fafc;
-          user-select: none;
-        }
         .tool-circle-btn {
           border: 1px solid #ececec;
           background: #ffffff;
@@ -3140,6 +3363,11 @@ export default function SearchInterface() {
           font-weight: 700;
           color: #1f2937;
           letter-spacing: 0.02em;
+        }
+        .tool-reasoning-btn {
+          width: auto;
+          min-width: 32px;
+          padding: 0 10px;
         }
         .prefs-line-top::before,
         .prefs-line-bottom::after {
@@ -3315,7 +3543,6 @@ export default function SearchInterface() {
           .cite-item { padding: 10px; }
           .tool-circle-btn { width: 30px; height: 30px; }
           .composer-mode-label { font-size: 15px; }
-          .composer-reasoning-label { font-size: 13px; }
           .prefs-glyph { width: 14px; height: 10px; }
           .prefs-line-top::before,
           .prefs-line-bottom::after {

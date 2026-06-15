@@ -24,6 +24,25 @@ export function toUserFacingChatError(error: unknown): { error: string; recovery
     };
   }
 
+  const isFileNotReadyFailure =
+    merged.includes("file_input_not_ready") ||
+    merged.includes("giving up on waiting for file") ||
+    (merged.includes("file") && merged.includes("processing"));
+  if (isFileNotReadyFailure) {
+    return {
+      error: "The uploaded file is still processing and could not be read yet.",
+      recovery: "Wait a few seconds, then retry. If it still fails, re-upload the file and submit again.",
+    };
+  }
+
+  const isFileProcessingFailure = merged.includes("file_input_failed");
+  if (isFileProcessingFailure) {
+    return {
+      error: "The uploaded file could not be processed for parsing.",
+      recovery: "Re-upload a clean, readable file and retry your request.",
+    };
+  }
+
   const isDeploymentFailure =
     status === 404 || merged.includes("deployment") || merged.includes("not found");
   if (isDeploymentFailure) {

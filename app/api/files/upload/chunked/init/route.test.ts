@@ -63,6 +63,46 @@ describe("POST /api/files/upload/chunked/init", () => {
         bytes: 7 * 1024 * 1024,
         filename: "large.pdf",
         mime_type: "application/pdf",
+        purpose: "user_data",
+      }),
+    );
+  });
+
+  it("falls back to assistants purpose when user_data purpose is rejected", async () => {
+    uploadsCreateSpy
+      .mockRejectedValueOnce({
+        status: 400,
+        message: "Invalid value for purpose",
+      })
+      .mockResolvedValueOnce({
+        id: "upload_456",
+      });
+
+    const req = new Request("http://localhost/api/files/upload/chunked/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "large-fallback.pdf",
+        size: 8 * 1024 * 1024,
+        type: "application/pdf",
+      }),
+    });
+
+    const res = await POST(req as never);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.uploadId).toBe("upload_456");
+    expect(uploadsCreateSpy).toHaveBeenCalledTimes(2);
+    expect(uploadsCreateSpy).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        purpose: "user_data",
+      }),
+    );
+    expect(uploadsCreateSpy).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
         purpose: "assistants",
       }),
     );

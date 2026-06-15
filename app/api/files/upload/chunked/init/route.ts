@@ -3,7 +3,10 @@ import {
   coerceMimeType,
   coerceSafeFilename,
   createAzureClient,
+  FILE_UPLOAD_PURPOSE_ORDER,
   getAzureConfig,
+  isPurposeRejectedError,
+  type UploadPurpose,
   type UploadsApi,
 } from "../../_lib";
 
@@ -64,12 +67,31 @@ export async function POST(req: NextRequest) {
     });
 
     const client = createAzureClient(config);
-    const upload = await (client as unknown as UploadsApi).uploads.create({
-      bytes: size,
-      filename,
-      mime_type: mimeType,
-      purpose: "assistants",
-    });
+    let upload: { id?: string } | null = null;
+    let selectedPurpose: UploadPurpose | null = null;
+    for (const purpose of FILE_UPLOAD_PURPOSE_ORDER) {
+      try {
+        upload = await (client as unknown as UploadsApi).uploads.create({
+          bytes: size,
+          filename,
+          mime_type: mimeType,
+          purpose,
+        });
+        selectedPurpose = purpose;
+        break;
+      } catch (error) {
+        const shouldFallback = purpose === "user_data" && isPurposeRejectedError(error);
+        if (!shouldFallback) {
+          throw error;
+        }
+        console.log("[/api/files/upload/chunked/init] user_data purpose rejected by deployment; retrying with assistants", {
+          filename,
+          size,
+          mimeType,
+          error,
+        });
+      }
+    }
     const uploadId = typeof upload?.id === "string" ? upload.id : "";
 
     if (!uploadId) {
@@ -90,6 +112,7 @@ export async function POST(req: NextRequest) {
       uploadId,
       filename,
       size,
+      purpose: selectedPurpose,
     });
 
     return NextResponse.json({

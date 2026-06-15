@@ -62,6 +62,26 @@ type OutputItem = {
   content?: OutputContent[];
 };
 
+type ResponseUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  input_tokens_details?: {
+    cached_tokens?: number;
+  };
+  output_tokens_details?: {
+    reasoning_tokens?: number;
+  };
+};
+
+type TokenUsageSummary = {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  reasoningTokens: number | null;
+  cachedInputTokens: number | null;
+};
+
 type ResponseInputText = {
   type: "input_text";
   text: string;
@@ -102,6 +122,23 @@ type ResponsesApi = {
     }) => Promise<{
       output_text?: string;
       output?: OutputItem[];
+      usage?: ResponseUsage;
+    }>;
+  };
+};
+
+type FilesReadinessApi = {
+  files: {
+    waitForProcessing: (
+      id: string,
+      options?: {
+        pollInterval?: number;
+        maxWait?: number;
+      },
+    ) => Promise<{
+      id?: string;
+      status?: string;
+      status_details?: string;
     }>;
   };
 };
@@ -199,6 +236,8 @@ const MEMORY_RETRIEVER_SCRIPT_CANDIDATES = [
   path.resolve(process.cwd(), "..", "my-gpt-search", "scripts", "retrieve_memory.py"),
   path.resolve(process.cwd(), "..", "scripts", "retrieve_memory.py"),
 ];
+const FILE_PROCESSING_POLL_INTERVAL_MS = 250;
+const FILE_PROCESSING_MAX_WAIT_MS = 20_000;
 
 function normalizeBase64FileData(input: string, mimeType?: string): string {
   if (input.startsWith("data:")) {
@@ -206,6 +245,49 @@ function normalizeBase64FileData(input: string, mimeType?: string): string {
   }
   const safeMimeType = (mimeType || "application/octet-stream").trim() || "application/octet-stream";
   return `data:${safeMimeType};base64,${input}`;
+}
+
+function normalizeFileStatus(raw: unknown): string {
+  return String(raw || "").trim().toLowerCase();
+}
+
+async function waitForUploadedFilesToBeReady(
+  client: FilesReadinessApi,
+  files: Array<{ fileId: string; name: string }>,
+): Promise<void> {
+  for (const file of files) {
+    try {
+      console.log("[/api/chat] Waiting for uploaded file processing before parsing", {
+        fileId: file.fileId,
+        name: file.name,
+        pollIntervalMs: FILE_PROCESSING_POLL_INTERVAL_MS,
+        maxWaitMs: FILE_PROCESSING_MAX_WAIT_MS,
+      });
+      const ready = await client.files.waitForProcessing(file.fileId, {
+        pollInterval: FILE_PROCESSING_POLL_INTERVAL_MS,
+        maxWait: FILE_PROCESSING_MAX_WAIT_MS,
+      });
+      const status = normalizeFileStatus(ready?.status);
+      if (status === "error" || status === "deleted") {
+        throw new Error(`FILE_INPUT_FAILED:${file.name}:${status || "unknown"}`);
+      }
+      console.log("[/api/chat] Uploaded file is ready for parsing", {
+        fileId: file.fileId,
+        name: file.name,
+        status: status || "unknown",
+      });
+    } catch (error) {
+      console.log("[/api/chat] Uploaded file was not ready for parsing", {
+        fileId: file.fileId,
+        name: file.name,
+        error,
+      });
+      if (error instanceof Error && error.message.startsWith("FILE_INPUT_FAILED:")) {
+        throw error;
+      }
+      throw new Error(`FILE_INPUT_NOT_READY:${file.name}`);
+    }
+  }
 }
 
 function resolveUseMemory(raw: unknown): boolean {
@@ -402,6 +484,24 @@ function normalizeAzureEndpoint(raw: string | undefined): string | undefined {
   return trimmed.replace(/\/openai$/i, "");
 }
 
+function normalizeTokenCount(raw: unknown): number | null {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+  return Math.max(0, Math.trunc(raw));
+}
+
+function summarizeTokenUsage(usage: ResponseUsage | undefined): TokenUsageSummary | null {
+  const summary: TokenUsageSummary = {
+    inputTokens: normalizeTokenCount(usage?.input_tokens),
+    outputTokens: normalizeTokenCount(usage?.output_tokens),
+    totalTokens: normalizeTokenCount(usage?.total_tokens),
+    reasoningTokens: normalizeTokenCount(usage?.output_tokens_details?.reasoning_tokens),
+    cachedInputTokens: normalizeTokenCount(usage?.input_tokens_details?.cached_tokens),
+  };
+
+  const hasAnyToken = Object.values(summary).some((value) => value !== null);
+  return hasAnyToken ? summary : null;
+}
+
 function getAzureConfig() {
   const apiKey = process.env.AZURE_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
   const endpoint = normalizeAzureEndpoint(
@@ -482,6 +582,20 @@ export async function POST(req: NextRequest) {
       endpoint: config.endpoint,
       apiVersion: config.apiVersion,
     });
+
+    const filesWithIds = files
+      .map((file, index) => {
+        const fileId = typeof file.fileId === "string" ? file.fileId.trim() : "";
+        if (!fileId) return null;
+        return {
+          fileId,
+          name: (file.name || `document-${index + 1}`).trim() || `document-${index + 1}`,
+        };
+      })
+      .filter((item): item is { fileId: string; name: string } => Boolean(item));
+    if (filesWithIds.length > 0) {
+      await waitForUploadedFilesToBeReady(client as unknown as FilesReadinessApi, filesWithIds);
+    }
 
     const contextSections: string[] = [];
 
@@ -649,10 +763,23 @@ export async function POST(req: NextRequest) {
         ?.flatMap((outputItem) => outputItem.content ?? [])
         .flatMap((contentItem) => contentItem.annotations ?? [])
         .filter((annotation): annotation is UrlCitation => annotation.type === "url_citation") ?? [];
+    const usage = summarizeTokenUsage(response.usage);
+
+    if (usage) {
+      console.log("[/api/chat] Response token usage", {
+        searchMode,
+        usage,
+      });
+    } else {
+      console.log("[/api/chat] Response token usage unavailable", {
+        searchMode,
+      });
+    }
 
     console.log("[/api/chat] Completed successfully", {
       hasAnswer: Boolean(response.output_text),
       citationCount: citations.length,
+      usage,
     });
 
     if (text && response.output_text) {
@@ -666,6 +793,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       answer: response.output_text ?? "",
       citations,
+      usage,
     });
   } catch (error) {
     console.log("[/api/chat] Request failed", error);
