@@ -238,6 +238,13 @@ const MEMORY_RETRIEVER_SCRIPT_CANDIDATES = [
 ];
 const FILE_PROCESSING_POLL_INTERVAL_MS = 250;
 const FILE_PROCESSING_MAX_WAIT_MS = 20_000;
+const ATTACHMENT_GROUNDING_INSTRUCTIONS = [
+  "Attachment handling requirements:",
+  "- One or more input_file attachments are included and must be treated as primary source material.",
+  "- do not claim you cannot access attached files.",
+  "- Extract specific details from attached files before relying on web sources.",
+  "- Use web search only to supplement or verify information that is missing from the attachments.",
+].join("\n");
 
 function normalizeBase64FileData(input: string, mimeType?: string): string {
   if (input.startsWith("data:")) {
@@ -675,6 +682,9 @@ export async function POST(req: NextRequest) {
       contextSections.push(`Git code context:\n${snippetEntries.join("\n\n")}`);
     }
 
+    const hasAttachedInputFiles = inputFiles.length > 0;
+    const shouldPreferAttachmentGrounding = hasAttachedInputFiles && searchMode !== "thinking";
+
     const composedInput = [`User request:\n${text || "Analyze and summarize the provided context."}`, ...contextSections].join("\n\n");
     const inputMessage: ResponseInputMessage = {
       type: "message",
@@ -700,18 +710,26 @@ export async function POST(req: NextRequest) {
       reasoningEffort,
       deployment: config.deployment,
     });
-    const instructions = await buildInstructionsWithOptionalMemory(useMemory, text);
+    if (shouldPreferAttachmentGrounding) {
+      console.log("[/api/chat] Attached files detected; preferring file-grounded reasoning with optional web supplementation", {
+        searchMode,
+        fileCount: inputFiles.length,
+      });
+    }
+
+    const baseInstructions = await buildInstructionsWithOptionalMemory(useMemory, text);
+    const instructions = shouldPreferAttachmentGrounding
+      ? `${baseInstructions}\n\n${ATTACHMENT_GROUNDING_INSTRUCTIONS}`
+      : baseInstructions;
     const baseRequest: ChatResponsesRequest = {
       model: config.deployment,
       instructions,
       tools: preset.tools,
-      tool_choice: preset.tool_choice,
+      tool_choice: shouldPreferAttachmentGrounding ? "auto" : preset.tool_choice,
       reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
       text: preset.text,
       input: [inputMessage],
     };
-
-    const hasAttachedInputFiles = inputFiles.length > 0;
 
     let response;
     try {

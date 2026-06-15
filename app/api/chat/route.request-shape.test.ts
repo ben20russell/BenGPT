@@ -482,6 +482,54 @@ describe("POST /api/chat request shape", () => {
     });
   });
 
+  it("does not force web_search tool usage when files are attached", async () => {
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "Used attached file content",
+      output: [],
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Use the attached document as the primary source",
+        mode: "web_search",
+        files: [
+          {
+            name: "brief.pdf",
+            type: "application/pdf",
+            size: 2222,
+            contentKind: "binary",
+            fileId: "file_brief_001",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+
+    const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
+      tools?: unknown[];
+      tool_choice?: string;
+      instructions?: string;
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    expect(firstCall.tools).toBeDefined();
+    expect(firstCall.tool_choice).toBe("auto");
+    expect(firstCall.instructions).toContain("do not claim you cannot access attached files");
+
+    const inputFile = firstCall.input?.[0]?.content?.find((item) => item.type === "input_file");
+    expect(inputFile).toMatchObject({
+      type: "input_file",
+      file_id: "file_brief_001",
+      filename: "brief.pdf",
+    });
+  });
+
   it("returns normalized token usage from response.usage", async () => {
     responsesCreateSpy.mockResolvedValue({
       output_text: "ok",
