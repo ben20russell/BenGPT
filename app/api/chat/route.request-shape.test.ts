@@ -608,6 +608,63 @@ describe("POST /api/chat request shape", () => {
     expect(thirdInputText.toLowerCase()).toContain("unsupported-input-file.pdf");
   });
 
+  it("falls back to text-only file notes when file-attached requests return server-side 500 errors", async () => {
+    responsesCreateSpy.mockImplementation(async (request: {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    }) => {
+      const hasInputFile = Boolean(
+        request.input?.[0]?.content?.some((item) => item.type === "input_file"),
+      );
+      if (hasInputFile) {
+        throw {
+          status: 500,
+          message: "internal_error while handling input_file",
+        };
+      }
+      return {
+        output_text: "Recovered despite file-input server error",
+        output: [],
+      };
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Use attached file if possible",
+        mode: "thinking",
+        useMemory: false,
+        files: [
+          {
+            name: "runtime-500.pdf",
+            type: "application/pdf",
+            size: 3456,
+            contentKind: "binary",
+            fileId: "file_runtime_500_1",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(2);
+
+    const secondCall = responsesCreateSpy.mock.calls[1]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const secondContent = secondCall.input?.[0]?.content || [];
+    const secondInputFile = secondContent.find((item) => item.type === "input_file");
+    const secondInputText = String(secondContent.find((item) => item.type === "input_text")?.text || "");
+
+    expect(secondInputFile).toBeUndefined();
+    expect(secondInputText.toLowerCase()).toContain("uploaded file references could not be attached");
+    expect(secondInputText.toLowerCase()).toContain("runtime-500.pdf");
+  });
+
   it("does not force web_search tool usage when files are attached", async () => {
     responsesCreateSpy.mockResolvedValue({
       output_text: "Used attached file content",

@@ -330,7 +330,7 @@ function isInputFileCompatibilityError(error: unknown): boolean {
     error?: { message?: string; code?: string };
   };
   const status = typeof maybe?.status === "number" ? maybe.status : undefined;
-  if (status !== undefined && status !== 400 && status !== 404 && status !== 422) {
+  if (status !== undefined && status < 400) {
     return false;
   }
 
@@ -344,9 +344,62 @@ function isInputFileCompatibilityError(error: unknown): boolean {
     merged.includes("unsupported") ||
     merged.includes("not supported") ||
     merged.includes("invalid") ||
-    merged.includes("unknown");
+    merged.includes("unknown") ||
+    merged.includes("internal_error") ||
+    merged.includes("server error") ||
+    merged.includes("failed");
 
   return mentionsInputFile && mentionsCompatibility;
+}
+
+function getErrorStatusCode(error: unknown): number | undefined {
+  const maybe = error as { status?: number };
+  return typeof maybe?.status === "number" ? maybe.status : undefined;
+}
+
+function shouldRetryWithTextOnlyAttachmentFallback(input: {
+  error: unknown;
+  hasAttachedInputFiles: boolean;
+}): boolean {
+  if (!input.hasAttachedInputFiles) {
+    return false;
+  }
+  const status = getErrorStatusCode(input.error);
+  if (typeof status === "number" && status >= 500) {
+    return true;
+  }
+  return isInputFileCompatibilityError(input.error);
+}
+
+function buildTextOnlyAttachmentFallbackInputMessage(input: {
+  composedInput: string;
+  files: UploadContextFile[];
+}): { inputMessage: ResponseInputMessage; attachmentNames: string[] } {
+  const attachmentNames = input.files.map((file, index) => {
+    const fallbackName = `document-${index + 1}`;
+    const name = String(file.name || "").trim();
+    return name || fallbackName;
+  });
+  const textOnlyAttachmentFallbackNotice = [
+    "Attachment fallback notice:",
+    "- Uploaded file references could not be attached for parsing in this deployment.",
+    "- Do not assume direct access to the uploaded files for this response.",
+    "Unavailable uploaded files:",
+    ...attachmentNames.map((name) => `- ${name}`),
+  ].join("\n");
+  return {
+    inputMessage: {
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: [input.composedInput, textOnlyAttachmentFallbackNotice].join("\n\n"),
+        },
+      ],
+    },
+    attachmentNames,
+  };
 }
 
 async function waitForUploadedFilesToBeReady(
@@ -905,78 +958,91 @@ export async function POST(req: NextRequest) {
           merged.includes("input_file") ||
           merged.includes("file_id") ||
           merged.includes("invalid"));
-
-      if (!shouldRetryMinimal) {
-        throw error;
-      }
-
-      const shouldDropToolsForRetry = hasAttachedInputFiles && searchMode !== "thinking";
-
-      console.log("[/api/chat] Retrying with minimal request shape after parameter rejection", {
-        searchMode,
-        status: maybe?.status,
-        message: maybe?.message,
-        shouldDropToolsForRetry,
+      const shouldRetryTextOnlyFromPrimary = shouldRetryWithTextOnlyAttachmentFallback({
+        error,
         hasAttachedInputFiles,
       });
 
-      const fallbackRequest: ChatResponsesRequest = {
-        model: config.deployment,
-        instructions,
-        input: [inputMessage],
-      };
-      if (preset.tools && searchMode !== "thinking" && !shouldDropToolsForRetry) {
-        fallbackRequest.tools = preset.tools;
+      if (!shouldRetryMinimal) {
+        if (shouldRetryTextOnlyFromPrimary) {
+          const textOnlyFallback = buildTextOnlyAttachmentFallbackInputMessage({
+            composedInput,
+            files,
+          });
+          console.log("[/api/chat] Retrying without input_file attachments after primary request failure", {
+            searchMode,
+            status: getErrorStatusCode(error),
+            message: maybe?.message,
+            unavailableAttachmentCount: textOnlyFallback.attachmentNames.length,
+          });
+          const textOnlyRequest: ChatResponsesRequest = {
+            model: config.deployment,
+            instructions,
+            input: [textOnlyFallback.inputMessage],
+          };
+          if (preset.tools && searchMode !== "thinking") {
+            textOnlyRequest.tools = preset.tools;
+          }
+          response = await (client as unknown as ResponsesApi).responses.create(textOnlyRequest);
+        } else {
+          throw error;
+        }
       }
 
-      try {
-        response = await (client as unknown as ResponsesApi).responses.create(fallbackRequest);
-      } catch (fallbackError) {
-        const shouldRetryTextOnlyFiles = hasAttachedInputFiles && isInputFileCompatibilityError(fallbackError);
-        if (!shouldRetryTextOnlyFiles) {
-          throw fallbackError;
-        }
+      else {
+        const shouldDropToolsForRetry = hasAttachedInputFiles && searchMode !== "thinking";
 
-        const attachmentNames = files.map((file, index) => {
-          const fallbackName = `document-${index + 1}`;
-          const name = String(file.name || "").trim();
-          return name || fallbackName;
-        });
-        const textOnlyAttachmentFallbackNotice = [
-          "Attachment fallback notice:",
-          "- Uploaded file references could not be attached for parsing in this deployment.",
-          "- Do not assume direct access to the uploaded files for this response.",
-          "Unavailable uploaded files:",
-          ...attachmentNames.map((name) => `- ${name}`),
-        ].join("\n");
-        const textOnlyInputMessage: ResponseInputMessage = {
-          type: "message",
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: [composedInput, textOnlyAttachmentFallbackNotice].join("\n\n"),
-            },
-          ],
-        };
-
-        console.log("[/api/chat] Retrying without input_file attachments after compatibility rejection", {
+        console.log("[/api/chat] Retrying with minimal request shape after parameter rejection", {
           searchMode,
-          status: (fallbackError as { status?: number })?.status,
-          message: (fallbackError as { message?: string })?.message,
-          unavailableAttachmentCount: attachmentNames.length,
+          status: maybe?.status,
+          message: maybe?.message,
+          shouldDropToolsForRetry,
+          hasAttachedInputFiles,
         });
 
-        const textOnlyRequest: ChatResponsesRequest = {
+        const fallbackRequest: ChatResponsesRequest = {
           model: config.deployment,
           instructions,
-          input: [textOnlyInputMessage],
+          input: [inputMessage],
         };
-        if (fallbackRequest.tools) {
-          textOnlyRequest.tools = fallbackRequest.tools;
+        if (preset.tools && searchMode !== "thinking" && !shouldDropToolsForRetry) {
+          fallbackRequest.tools = preset.tools;
         }
 
-        response = await (client as unknown as ResponsesApi).responses.create(textOnlyRequest);
+        try {
+          response = await (client as unknown as ResponsesApi).responses.create(fallbackRequest);
+        } catch (fallbackError) {
+          const shouldRetryTextOnlyFiles = shouldRetryWithTextOnlyAttachmentFallback({
+            error: fallbackError,
+            hasAttachedInputFiles,
+          });
+          if (!shouldRetryTextOnlyFiles) {
+            throw fallbackError;
+          }
+
+          const textOnlyFallback = buildTextOnlyAttachmentFallbackInputMessage({
+            composedInput,
+            files,
+          });
+
+          console.log("[/api/chat] Retrying without input_file attachments after compatibility rejection", {
+            searchMode,
+            status: getErrorStatusCode(fallbackError),
+            message: (fallbackError as { message?: string })?.message,
+            unavailableAttachmentCount: textOnlyFallback.attachmentNames.length,
+          });
+
+          const textOnlyRequest: ChatResponsesRequest = {
+            model: config.deployment,
+            instructions,
+            input: [textOnlyFallback.inputMessage],
+          };
+          if (fallbackRequest.tools) {
+            textOnlyRequest.tools = fallbackRequest.tools;
+          }
+
+          response = await (client as unknown as ResponsesApi).responses.create(textOnlyRequest);
+        }
       }
     }
 
