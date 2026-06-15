@@ -691,6 +691,86 @@ describe('SearchInterface', () => {
     expect(directCalls).toHaveLength(0);
   });
 
+  it('falls back to direct upload when chunked init fails for a large PDF', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload/chunked/init')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            error: 'Could not start chunked upload.',
+            recovery: 'Uploads API is unavailable for this deployment.',
+          }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/part')) {
+        throw new Error('chunked part should not be called when init fails');
+      }
+
+      if (url.includes('/api/files/upload/chunked/complete')) {
+        throw new Error('chunked complete should not be called when init fails');
+      }
+
+      if (url.includes('/api/files/upload')) {
+        return {
+          ok: true,
+          json: async () => ({ fileId: 'file_large_direct_fallback_1' }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Used direct fallback', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const hugePdfBytes = new Uint8Array(6 * 1024 * 1024 + 128);
+    const hugePdfFile = new File([hugePdfBytes], 'large-fallback.pdf', { type: 'application/pdf' });
+    await user.upload(screen.getByTestId('file-input'), hugePdfFile);
+    await user.type(screen.getByTestId('message-input'), 'Use this upload');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    const payload = JSON.parse(String(init.body));
+    expect(payload.files).toHaveLength(1);
+    expect(payload.files[0].name).toBe('large-fallback.pdf');
+    expect(payload.files[0].contentKind).toBe('binary');
+    expect(payload.files[0].fileId).toBe('file_large_direct_fallback_1');
+
+    const initCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/api/files/upload/chunked/init'));
+    const directCalls = fetchMock.mock.calls.filter(
+      (call) =>
+        String(call[0]).includes('/api/files/upload') &&
+        !String(call[0]).includes('/api/files/upload/chunked/'),
+    );
+    const partCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/api/files/upload/chunked/part'));
+    const completeCalls = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes('/api/files/upload/chunked/complete'),
+    );
+
+    expect(initCalls).toHaveLength(1);
+    expect(directCalls).toHaveLength(1);
+    expect(partCalls).toHaveLength(0);
+    expect(completeCalls).toHaveLength(0);
+  });
+
   it('falls back to chunked upload when direct PDF upload fails so files still reach /api/chat as file ids', async () => {
     const user = userEvent.setup();
     let partCounter = 0;

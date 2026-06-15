@@ -735,7 +735,37 @@ async function uploadBinaryContextFileChunked(file: File): Promise<string> {
 
 async function uploadBinaryContextFileSmart(file: File): Promise<string> {
   if (file.size > DIRECT_UPLOAD_PREFERENCE_BYTES) {
-    return uploadBinaryContextFileChunked(file);
+    try {
+      return await uploadBinaryContextFileChunked(file);
+    } catch (chunkedUploadError) {
+      console.log('[UI] Chunked upload failed for large file; attempting direct upload fallback', {
+        name: file.name,
+        size: file.size,
+        chunkedUploadError,
+      });
+
+      try {
+        return await uploadBinaryContextFile(file);
+      } catch (directUploadError) {
+        const directMessage =
+          directUploadError instanceof Error
+            ? directUploadError.message.toLowerCase()
+            : String(directUploadError || '').toLowerCase();
+        const directPayloadLimit =
+          directMessage.includes('413') ||
+          directMessage.includes('payload too large') ||
+          directMessage.includes('request too large') ||
+          directMessage.includes('entity too large');
+
+        if (directPayloadLimit) {
+          throw new Error(
+            'Large file upload failed because chunked uploads are unavailable and direct uploads exceeded payload limits.',
+          );
+        }
+
+        throw chunkedUploadError;
+      }
+    }
   }
 
   try {
@@ -853,7 +883,8 @@ async function normalizeUploadFile(file: File, uploadId?: string): Promise<Uploa
     };
   } catch (error) {
     console.log('[UI] Failed to upload file to files API', { name: file.name, size: file.size, type: file.type, error });
-    throw new Error(`Could not upload file for model parsing: ${file.name}`);
+    const reason = error instanceof Error ? error.message : 'Unknown upload error';
+    throw new Error(`Could not upload file for model parsing: ${file.name}. ${reason}`);
   }
 }
 
@@ -1015,7 +1046,7 @@ export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}
   const [isUiBooted, setIsUiBooted] = useState(process.env.NODE_ENV === 'test');
   const [deviceId] = useState(initializeDeviceId);
   const [recentsHydrated, setRecentsHydrated] = useState(false);
-  const initialComposerPreferences = useMemo(() => resolveInitialComposerPreferences(), []);
+  const [composerPreferencesHydrated, setComposerPreferencesHydrated] = useState(false);
   const resolvedChatModelLabel = useMemo(() => resolveChatModelLabel(chatModel), [chatModel]);
 
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
@@ -1039,10 +1070,8 @@ export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}
   const [gitSnippets, setGitSnippets] = useState<GitCodeContext[]>([]);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const [toolsMenuType, setToolsMenuType] = useState<'add' | 'preferences' | 'reasoning'>('add');
-  const [searchMode, setSearchMode] = useState<SearchMode>(initialComposerPreferences.searchMode);
-  const [reasoningIntensity, setReasoningIntensity] = useState<ReasoningIntensity>(
-    initialComposerPreferences.reasoningIntensity,
-  );
+  const [searchMode, setSearchMode] = useState<SearchMode>(DEFAULT_SEARCH_MODE);
+  const [reasoningIntensity, setReasoningIntensity] = useState<ReasoningIntensity>(DEFAULT_REASONING_INTENSITY);
   const [useMemory, setUseMemory] = useState(true);
   const [welcomeSuggestions, setWelcomeSuggestions] = useState<string[]>(FALLBACK_WELCOME_SUGGESTIONS);
   const [isResultsExpanded, setIsResultsExpanded] = useState(false);
@@ -1111,6 +1140,18 @@ export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    const restored = resolveInitialComposerPreferences();
+    const frame = window.requestAnimationFrame(() => {
+      setSearchMode(restored.searchMode);
+      setReasoningIntensity(restored.reasoningIntensity);
+      setComposerPreferencesHydrated(true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!composerPreferencesHydrated) return;
 
     const payload: PersistedComposerPreferences = {
       searchMode,
@@ -1127,7 +1168,7 @@ export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}
         error,
       });
     }
-  }, [searchMode, reasoningIntensity]);
+  }, [composerPreferencesHydrated, searchMode, reasoningIntensity]);
 
   useEffect(() => {
     if (!isResultsExpanded) return;
