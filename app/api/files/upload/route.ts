@@ -1,34 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AzureOpenAI } from "openai";
+import { createAzureClient, type FilesApi, getAzureConfig } from "./_lib";
 
 export const runtime = "nodejs";
-
-type FilesApi = {
-  files: {
-    create: (params: { file: File; purpose: "assistants" | "user_data" }) => Promise<{ id?: string }>;
-  };
-};
-
-function normalizeAzureEndpoint(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  const trimmed = raw.trim().replace(/\/+$/, "");
-  return trimmed.replace(/\/openai$/i, "");
-}
-
-function getAzureConfig() {
-  const apiKey = process.env.AZURE_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
-  const endpoint = normalizeAzureEndpoint(
-    process.env.AZURE_OPENAI_ENDPOINT ?? process.env.OPENAI_ENDPOINT,
-  );
-  const apiVersion = process.env.AZURE_OPENAI_API_VERSION ?? process.env.OPENAI_API_VERSION;
-
-  const missing: string[] = [];
-  if (!apiKey) missing.push("AZURE_OPENAI_API_KEY");
-  if (!endpoint) missing.push("AZURE_OPENAI_ENDPOINT");
-  if (!apiVersion) missing.push("AZURE_OPENAI_API_VERSION");
-
-  return { apiKey, endpoint, apiVersion, missing };
-}
 
 export async function POST(req: NextRequest) {
   try {
@@ -80,11 +53,7 @@ export async function POST(req: NextRequest) {
       apiVersion: config.apiVersion,
     });
 
-    const client = new AzureOpenAI({
-      apiKey: config.apiKey,
-      endpoint: config.endpoint,
-      apiVersion: config.apiVersion,
-    });
+    const client = createAzureClient(config);
     const uploaded = await (client as unknown as FilesApi).files.create({
       file: fileField,
       purpose: "assistants",

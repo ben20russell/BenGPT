@@ -288,7 +288,7 @@ async function getMemoryWritePath(): Promise<string> {
     try {
       await readFile(memoryPath, "utf8");
       return memoryPath;
-    } catch (_error) {
+    } catch {
       // Intentionally continue through candidates until one exists.
     }
   }

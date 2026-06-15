@@ -3,7 +3,7 @@
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET, POST } from "./route";
 
@@ -146,5 +146,57 @@ describe("POST/GET /api/recent-searches", () => {
     expect(loadRes.status).toBe(200);
     expect(loadJson.activeConversationId).toBe("prod-1");
     expect(loadJson.conversations).toHaveLength(1);
+  });
+
+  it("returns safe non-500 responses when local fallback store is not writable", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+    const writeSpy = vi
+      .spyOn(fs, "writeFile")
+      .mockRejectedValue(Object.assign(new Error("read-only filesystem"), { code: "EROFS" }));
+
+    const saveReq = new Request("http://localhost/api/recent-searches", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-forwarded-for": "198.51.100.88",
+        "x-device-id": "read-only-device",
+      },
+      body: JSON.stringify({
+        activeConversationId: "readonly-1",
+        conversations: [{ id: "readonly-1", title: "Read only fallback", turns: [] }],
+      }),
+    });
+
+    const saveRes = await POST(saveReq as never);
+    const saveJson = await saveRes.json();
+
+    expect(saveRes.status).toBe(200);
+    expect(saveJson.ok).toBe(true);
+
+    writeSpy.mockRestore();
+
+    const readSpy = vi
+      .spyOn(fs, "readFile")
+      .mockRejectedValue(Object.assign(new Error("read-only filesystem"), { code: "EROFS" }));
+
+    const loadReq = new Request("http://localhost/api/recent-searches", {
+      method: "GET",
+      headers: {
+        "x-forwarded-for": "198.51.100.88",
+        "x-device-id": "read-only-device",
+      },
+    });
+    const loadRes = await GET(loadReq as never);
+    const loadJson = await loadRes.json();
+
+    expect(loadRes.status).toBe(200);
+    expect(loadJson.activeConversationId).toBeNull();
+    expect(loadJson.conversations).toEqual([]);
+
+    readSpy.mockRestore();
   });
 });

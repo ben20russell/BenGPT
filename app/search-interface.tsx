@@ -30,6 +30,8 @@ const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string; summary: st
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
 const MAX_TEXT_FILE_CHARS = 60000;
 const MAX_BINARY_INLINE_FILE_BYTES = 400 * 1024;
+const MAX_DIRECT_BINARY_UPLOAD_BYTES = 4 * 1024 * 1024;
+const CHUNKED_UPLOAD_PART_BYTES = 3 * 1024 * 1024;
 const MAX_CHAT_PAYLOAD_BYTES = 900 * 1024;
 const LARGE_BINARY_FILE_NOTE = `Binary content omitted because the file is too large for inline upload (${Math.round(MAX_BINARY_INLINE_FILE_BYTES / 1024)} KB max).`;
 const PAYLOAD_BUDGET_NOTE = 'Binary content omitted to keep the request size under the payload limit.';
@@ -90,10 +92,6 @@ function detectMobileBrowser(explicitUserAgent?: string): MobileBrowser {
   }
 
   return 'unknown';
-}
-
-function detectMobileLayout(): boolean {
-  return detectMobileViewport() || detectMobileUserAgent();
 }
 
 function initializeDeviceId(): string {
@@ -534,8 +532,36 @@ function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
   });
 }
 
+function getApiBase() {
+  return process.env.NODE_ENV === 'test' ? 'http://localhost' : '';
+}
+
 function getFileUploadEndpoint() {
-  return process.env.NODE_ENV === 'test' ? 'http://localhost/api/files/upload' : '/api/files/upload';
+  return `${getApiBase()}/api/files/upload`;
+}
+
+function getChunkedUploadInitEndpoint() {
+  return `${getApiBase()}/api/files/upload/chunked/init`;
+}
+
+function getChunkedUploadPartEndpoint() {
+  return `${getApiBase()}/api/files/upload/chunked/part`;
+}
+
+function getChunkedUploadCompleteEndpoint() {
+  return `${getApiBase()}/api/files/upload/chunked/complete`;
+}
+
+async function parseUploadJson(response: Response) {
+  return (await response.json().catch(() => null)) as
+    | {
+        fileId?: string;
+        uploadId?: string;
+        partId?: string;
+        error?: string;
+        recovery?: string;
+      }
+    | null;
 }
 
 async function uploadBinaryContextFile(file: File): Promise<string> {
@@ -554,9 +580,7 @@ async function uploadBinaryContextFile(file: File): Promise<string> {
     body: formData,
   });
 
-  const json = (await response.json().catch(() => null)) as
-    | { fileId?: string; error?: string; recovery?: string }
-    | null;
+  const json = await parseUploadJson(response);
 
   if (!response.ok) {
     const details = [json?.error, json?.recovery].filter(Boolean).join(' ');
@@ -572,6 +596,121 @@ async function uploadBinaryContextFile(file: File): Promise<string> {
     fileId: json.fileId,
   });
   return json.fileId;
+}
+
+async function uploadBinaryContextFileChunked(file: File): Promise<string> {
+  const initEndpoint = getChunkedUploadInitEndpoint();
+  const partEndpoint = getChunkedUploadPartEndpoint();
+  const completeEndpoint = getChunkedUploadCompleteEndpoint();
+  console.log('[UI] Starting chunked binary file upload', {
+    name: file.name,
+    size: file.size,
+    type: file.type,
+    partBytes: CHUNKED_UPLOAD_PART_BYTES,
+    initEndpoint,
+  });
+
+  const initResponse = await fetch(initEndpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: file.name || 'upload.bin',
+      size: file.size,
+      type: file.type || 'application/octet-stream',
+    }),
+  });
+  const initJson = await parseUploadJson(initResponse);
+  if (!initResponse.ok) {
+    const details = [initJson?.error, initJson?.recovery].filter(Boolean).join(' ');
+    throw new Error(details || `Chunked upload init failed with status ${initResponse.status}`);
+  }
+  const uploadId = typeof initJson?.uploadId === 'string' ? initJson.uploadId : '';
+  if (!uploadId) {
+    throw new Error('Chunked upload init returned no uploadId');
+  }
+
+  const partIds: string[] = [];
+  for (let start = 0, partIndex = 0; start < file.size; start += CHUNKED_UPLOAD_PART_BYTES, partIndex += 1) {
+    const end = Math.min(start + CHUNKED_UPLOAD_PART_BYTES, file.size);
+    const partBlob = file.slice(start, end);
+    const formData = new FormData();
+    formData.append('uploadId', uploadId);
+    formData.append('partIndex', String(partIndex));
+    formData.append('part', partBlob, `${file.name || 'upload.bin'}.part-${partIndex}`);
+
+    const partResponse = await fetch(partEndpoint, {
+      method: 'POST',
+      body: formData,
+    });
+    const partJson = await parseUploadJson(partResponse);
+    if (!partResponse.ok) {
+      const details = [partJson?.error, partJson?.recovery].filter(Boolean).join(' ');
+      throw new Error(details || `Chunked part upload failed with status ${partResponse.status}`);
+    }
+
+    const partId = typeof partJson?.partId === 'string' ? partJson.partId : '';
+    if (!partId) {
+      throw new Error(`Chunked part upload returned no partId for part ${partIndex}`);
+    }
+    partIds.push(partId);
+  }
+
+  const completeResponse = await fetch(completeEndpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      uploadId,
+      partIds,
+    }),
+  });
+  const completeJson = await parseUploadJson(completeResponse);
+  if (!completeResponse.ok) {
+    const details = [completeJson?.error, completeJson?.recovery].filter(Boolean).join(' ');
+    throw new Error(details || `Chunked upload completion failed with status ${completeResponse.status}`);
+  }
+  if (!completeJson?.fileId || typeof completeJson.fileId !== 'string') {
+    throw new Error('Chunked upload completion returned no fileId');
+  }
+
+  console.log('[UI] Chunked binary file upload completed', {
+    name: file.name,
+    size: file.size,
+    uploadId,
+    partCount: partIds.length,
+    fileId: completeJson.fileId,
+  });
+  return completeJson.fileId;
+}
+
+async function uploadBinaryContextFileSmart(file: File): Promise<string> {
+  if (file.size > MAX_DIRECT_BINARY_UPLOAD_BYTES) {
+    return uploadBinaryContextFileChunked(file);
+  }
+
+  try {
+    return await uploadBinaryContextFile(file);
+  } catch (error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error || '').toLowerCase();
+    const shouldRetryChunked =
+      message.includes('413') ||
+      message.includes('payload too large') ||
+      message.includes('request too large') ||
+      message.includes('entity too large');
+
+    if (shouldRetryChunked) {
+      console.log('[UI] Direct binary upload hit payload limit; retrying with chunked upload', {
+        name: file.name,
+        size: file.size,
+      });
+      return uploadBinaryContextFileChunked(file);
+    }
+
+    throw error;
+  }
 }
 
 function estimateUtf8Bytes(value: string): number {
@@ -674,7 +813,7 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
     }
 
     try {
-      const fileId = await uploadBinaryContextFile(file);
+      const fileId = await uploadBinaryContextFileSmart(file);
       return {
         ...base,
         contentKind: 'binary',
@@ -887,8 +1026,8 @@ export default function SearchInterface() {
   const [recentsHydrated, setRecentsHydrated] = useState(false);
 
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
-  const [isMobileUserAgent, setIsMobileUserAgent] = useState(detectMobileUserAgent);
-  const [mobileBrowser, setMobileBrowser] = useState<MobileBrowser>(detectMobileBrowser);
+  const [isMobileUserAgent] = useState(detectMobileUserAgent);
+  const [mobileBrowser] = useState<MobileBrowser>(detectMobileBrowser);
   const [mobileRecentsMenuOpen, setMobileRecentsMenuOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
@@ -964,15 +1103,12 @@ export default function SearchInterface() {
       isMobileUserAgent: nextIsMobileUserAgent,
       mobileBrowser: nextMobileBrowser,
     });
-    setIsMobileUserAgent(nextIsMobileUserAgent);
-    setMobileBrowser(nextMobileBrowser);
   }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
 
     const mediaQuery = window.matchMedia(MOBILE_BREAKPOINT_QUERY);
-    setIsMobileViewport(mediaQuery.matches);
     if (mediaQuery.matches) {
       console.log('[UI] Mobile viewport detected');
     }
@@ -981,19 +1117,15 @@ export default function SearchInterface() {
       const isMobile = event.matches;
       console.log('[UI] Viewport breakpoint changed', { isMobile });
       setIsMobileViewport(isMobile);
+      if (!isMobile) {
+        console.log('[UI] Closing mobile recents menu after switching to desktop layout');
+        setMobileRecentsMenuOpen(false);
+      }
     };
 
     mediaQuery.addEventListener('change', onViewportChange);
     return () => mediaQuery.removeEventListener('change', onViewportChange);
   }, []);
-
-  useEffect(() => {
-    if (isMobileLayout) return;
-    if (!mobileRecentsMenuOpen) return;
-
-    console.log('[UI] Closing mobile recents menu after switching to desktop layout');
-    setMobileRecentsMenuOpen(false);
-  }, [isMobileLayout, mobileRecentsMenuOpen]);
 
   useEffect(() => {
     if (!deviceId) return;

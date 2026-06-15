@@ -453,6 +453,91 @@ describe('SearchInterface', () => {
     expect(String(payload.files[0].note || '')).toContain('Uploaded');
   });
 
+  it('uploads very large PDFs through chunked upload endpoints to avoid 413 payload errors', async () => {
+    const user = userEvent.setup();
+    let partCounter = 0;
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload/chunked/init')) {
+        return {
+          ok: true,
+          json: async () => ({ uploadId: 'upload_pdf_chunked_1' }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/part')) {
+        partCounter += 1;
+        return {
+          ok: true,
+          json: async () => ({ partId: `part_${partCounter}` }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/complete')) {
+        return {
+          ok: true,
+          json: async () => ({ fileId: 'file_pdf_chunked_final_1' }),
+        };
+      }
+
+      if (url.includes('/api/files/upload')) {
+        return {
+          ok: true,
+          json: async () => ({ fileId: 'file_pdf_direct_should_not_be_used' }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Chunked upload worked', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const hugePdfBytes = new Uint8Array(6 * 1024 * 1024 + 512);
+    const hugePdfFile = new File([hugePdfBytes], 'chunked-huge.pdf', { type: 'application/pdf' });
+    await user.upload(screen.getByTestId('file-input'), hugePdfFile);
+    await user.type(screen.getByTestId('message-input'), 'Analyze this very large PDF');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    const payload = JSON.parse(String(init.body));
+    expect(payload.files).toHaveLength(1);
+    expect(payload.files[0].name).toBe('chunked-huge.pdf');
+    expect(payload.files[0].contentKind).toBe('binary');
+    expect(payload.files[0].fileId).toBe('file_pdf_chunked_final_1');
+    expect(payload.files[0].contentBase64).toBeUndefined();
+
+    const initCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/api/files/upload/chunked/init'));
+    const partCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/api/files/upload/chunked/part'));
+    const completeCalls = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes('/api/files/upload/chunked/complete'),
+    );
+    const directCalls = fetchMock.mock.calls.filter(
+      (call) =>
+        String(call[0]).includes('/api/files/upload') &&
+        !String(call[0]).includes('/api/files/upload/chunked/'),
+    );
+
+    expect(initCalls).toHaveLength(1);
+    expect(partCalls.length).toBeGreaterThan(1);
+    expect(completeCalls).toHaveLength(1);
+    expect(directCalls).toHaveLength(0);
+  });
+
   it('shows a recovery message when /api/chat returns request-too-large', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn().mockResolvedValue({

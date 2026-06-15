@@ -108,6 +108,31 @@ async function writeStore(next: StoredRecentSearchesRecord) {
   await fs.writeFile(filePath, JSON.stringify(next, null, 2), "utf8");
 }
 
+async function readStoreSafe(): Promise<StoredRecentSearchesRecord | null> {
+  try {
+    return await readStore();
+  } catch (error) {
+    console.log("[/api/recent-searches] Local store unavailable; continuing without file fallback", {
+      storePath: getStorePath(),
+      error,
+    });
+    return null;
+  }
+}
+
+async function writeStoreSafe(next: StoredRecentSearchesRecord): Promise<boolean> {
+  try {
+    await writeStore(next);
+    return true;
+  } catch (error) {
+    console.log("[/api/recent-searches] Failed to write local store; continuing without file fallback", {
+      storePath: getStorePath(),
+      error,
+    });
+    return false;
+  }
+}
+
 function getClientIp(req: NextRequest): string {
   const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
   const realIp = req.headers.get("x-real-ip")?.trim();
@@ -256,7 +281,14 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    const store = await readStore();
+    const store = await readStoreSafe();
+    if (!store) {
+      console.log("[/api/recent-searches] Returning empty recents because local store is unavailable", { key });
+      return NextResponse.json({
+        conversations: [],
+        activeConversationId: null,
+      });
+    }
     const existing = store[key];
     if (!existing) {
       console.log("[/api/recent-searches] No local recents found for key", { key });
@@ -281,10 +313,11 @@ export async function GET(req: NextRequest) {
     console.log("[/api/recent-searches] GET failed", { error });
     return NextResponse.json(
       {
-        error: "Could not load recent searches.",
-        recovery: "Check Supabase environment variables in deployment settings, then retry.",
+        conversations: [],
+        activeConversationId: null,
+        degraded: true,
       },
-      { status: 500 },
+      { status: 200 },
     );
   }
 }
@@ -325,13 +358,21 @@ export async function POST(req: NextRequest) {
     }
 
     if (!wroteToSupabase) {
-      const store = await readStore();
+      const store = await readStoreSafe();
+      if (!store) {
+        console.log("[/api/recent-searches] Skipping local save because store is unavailable", { key });
+        return NextResponse.json({ ok: true, degraded: true, storage: "none" });
+      }
       store[key] = {
         conversations,
         activeConversationId,
         updatedAt: new Date().toISOString(),
       };
-      await writeStore(store);
+      const wroteLocal = await writeStoreSafe(store);
+      if (!wroteLocal) {
+        console.log("[/api/recent-searches] Local save skipped after write failure", { key });
+        return NextResponse.json({ ok: true, degraded: true, storage: "none" });
+      }
       console.log("[/api/recent-searches] Saved recents to local store", {
         key,
         conversations: conversations.length,
@@ -350,10 +391,11 @@ export async function POST(req: NextRequest) {
     console.log("[/api/recent-searches] POST failed", { error });
     return NextResponse.json(
       {
-        error: "Could not save recent searches.",
-        recovery: "Check Supabase environment variables and table/policies, then retry.",
+        ok: true,
+        degraded: true,
+        storage: "none",
       },
-      { status: 500 },
+      { status: 200 },
     );
   }
 }
