@@ -378,4 +378,56 @@ describe("POST /api/chat request shape", () => {
     });
     expect(String(inputFile?.file_data || "")).toMatch(/^data:application\/pdf;base64,/);
   });
+
+  it("retries without web tools when uploaded files are incompatible with web_search tools", async () => {
+    responsesCreateSpy.mockImplementation(async (request: { tools?: unknown[] }) => {
+      if (Array.isArray(request.tools) && request.tools.length > 0) {
+        throw {
+          status: 400,
+          message: "input_file attachments are not supported with web_search tools",
+        };
+      }
+      return {
+        output_text: "Recovered answer",
+        output: [],
+      };
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Analyze this file with current events context",
+        mode: "web_search",
+        files: [
+          {
+            name: "report.pdf",
+            type: "application/pdf",
+            size: 1111,
+            contentKind: "binary",
+            fileId: "file_report_001",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(2);
+
+    const retryCall = responsesCreateSpy.mock.calls[1]?.[0] as {
+      tools?: unknown[];
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    expect(retryCall.tools).toBeUndefined();
+    const retryInputFile = retryCall.input?.[0]?.content?.find((item) => item.type === "input_file");
+    expect(retryInputFile).toBeDefined();
+    expect(retryInputFile).toMatchObject({
+      type: "input_file",
+      file_id: "file_report_001",
+      filename: "report.pdf",
+    });
+  });
 });

@@ -597,29 +597,39 @@ export async function POST(req: NextRequest) {
       input: [inputMessage],
     };
 
+    const hasAttachedInputFiles = inputFiles.length > 0;
+
     let response;
     try {
       response = await (client as unknown as ResponsesApi).responses.create(baseRequest);
     } catch (error) {
       const maybe = error as { status?: number; message?: string; error?: { message?: string } };
       const merged = `${(maybe?.message || "").toLowerCase()} ${(maybe?.error?.message || "").toLowerCase()}`;
+      const isRequestShapeRejection = maybe?.status === 400 || maybe?.status === 422;
       const shouldRetryMinimal =
-        maybe?.status === 400 &&
+        isRequestShapeRejection &&
         (merged.includes("reasoning") ||
           merged.includes("tool_choice") ||
           merged.includes("text") ||
           merged.includes("verbosity") ||
           merged.includes("unsupported") ||
+          merged.includes("not supported") ||
+          merged.includes("input_file") ||
+          merged.includes("file_id") ||
           merged.includes("invalid"));
 
       if (!shouldRetryMinimal) {
         throw error;
       }
 
+      const shouldDropToolsForRetry = hasAttachedInputFiles && searchMode !== "thinking";
+
       console.log("[/api/chat] Retrying with minimal request shape after parameter rejection", {
         searchMode,
         status: maybe?.status,
         message: maybe?.message,
+        shouldDropToolsForRetry,
+        hasAttachedInputFiles,
       });
 
       const fallbackRequest: ChatResponsesRequest = {
@@ -627,7 +637,7 @@ export async function POST(req: NextRequest) {
         instructions,
         input: [inputMessage],
       };
-      if (preset.tools && searchMode !== "thinking") {
+      if (preset.tools && searchMode !== "thinking" && !shouldDropToolsForRetry) {
         fallbackRequest.tools = preset.tools;
       }
 
