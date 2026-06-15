@@ -1,5 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAzureClient, getAzureConfig, type UploadsApi } from "../../_lib";
+import {
+  createAzureClient,
+  FILE_UPLOAD_PURPOSE_ORDER,
+  getAzureConfig,
+  isPurposeRejectedError,
+  type FilesApi,
+  type UploadPurpose,
+  type UploadsApi,
+} from "../../_lib";
+import {
+  LOCAL_UPLOAD_STRATEGY,
+  assembleLocalChunkedUpload,
+  clearLocalChunkedUpload,
+  isLocalChunkedUploadId,
+} from "../local-store";
 
 export const runtime = "nodejs";
 
@@ -57,6 +71,85 @@ export async function POST(req: NextRequest) {
         },
         { status: 400 },
       );
+    }
+
+    if (isLocalChunkedUploadId(uploadId)) {
+      console.log("[/api/files/upload/chunked/complete] Completing local chunked upload strategy", {
+        uploadId,
+        partCount: partIds.length,
+      });
+      try {
+        const assembled = await assembleLocalChunkedUpload({
+          uploadId,
+          partIds,
+        });
+
+        const client = createAzureClient(config);
+        let uploaded: { id?: string } | null = null;
+        let selectedPurpose: UploadPurpose | null = null;
+        for (const purpose of FILE_UPLOAD_PURPOSE_ORDER) {
+          try {
+            uploaded = await (client as unknown as FilesApi).files.create({
+              file: assembled.file,
+              purpose,
+            });
+            selectedPurpose = purpose;
+            break;
+          } catch (error) {
+            const shouldFallback = purpose === "user_data" && isPurposeRejectedError(error);
+            if (!shouldFallback) {
+              throw error;
+            }
+            console.log(
+              "[/api/files/upload/chunked/complete] Local completion file create rejected user_data purpose; retrying with assistants",
+              {
+                uploadId,
+                filename: assembled.meta.filename,
+                mimeType: assembled.meta.mimeType,
+                bytes: assembled.bytes,
+                error,
+              },
+            );
+          }
+        }
+
+        const fileId = typeof uploaded?.id === "string" ? uploaded.id : "";
+        if (!fileId) {
+          console.log("[/api/files/upload/chunked/complete] Local completion file create returned no file id", {
+            uploadId,
+            partCount: partIds.length,
+          });
+          return NextResponse.json(
+            {
+              error: "Chunked upload completed but no file ID was returned.",
+              recovery: "Retry upload completion. If this persists, verify Azure Files API support for this deployment.",
+            },
+            { status: 502 },
+          );
+        }
+
+        console.log("[/api/files/upload/chunked/complete] Local chunked upload completed successfully", {
+          uploadId,
+          partCount: partIds.length,
+          fileId,
+          bytes: assembled.bytes,
+          purpose: selectedPurpose,
+        });
+
+        return NextResponse.json({
+          fileId,
+          uploadId,
+          partCount: partIds.length,
+          strategy: LOCAL_UPLOAD_STRATEGY,
+        });
+      } finally {
+        await clearLocalChunkedUpload(uploadId).catch((cleanupError) => {
+          console.log("[/api/files/upload/chunked/complete] Failed to clear local chunked upload artifacts", {
+            uploadId,
+            cleanupError,
+          });
+        });
+      }
     }
 
     console.log("[/api/files/upload/chunked/complete] Completing upload", {

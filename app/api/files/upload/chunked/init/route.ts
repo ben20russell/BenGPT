@@ -9,6 +9,7 @@ import {
   type UploadPurpose,
   type UploadsApi,
 } from "../../_lib";
+import { createLocalChunkedUploadSession } from "../local-store";
 
 export const runtime = "nodejs";
 
@@ -66,6 +67,27 @@ export async function POST(req: NextRequest) {
       apiVersion: config.apiVersion,
     });
 
+    async function createLocalFallbackSession(reason: unknown) {
+      console.log("[/api/files/upload/chunked/init] Falling back to local chunked upload session", {
+        filename,
+        size,
+        mimeType,
+        reason,
+      });
+      const localSession = await createLocalChunkedUploadSession({
+        filename,
+        mimeType,
+        size,
+      });
+      return NextResponse.json({
+        uploadId: localSession.uploadId,
+        name: filename,
+        size,
+        type: mimeType,
+        strategy: localSession.strategy,
+      });
+    }
+
     const client = createAzureClient(config);
     let upload: { id?: string } | null = null;
     let selectedPurpose: UploadPurpose | null = null;
@@ -81,31 +103,37 @@ export async function POST(req: NextRequest) {
         break;
       } catch (error) {
         const shouldFallback = purpose === "user_data" && isPurposeRejectedError(error);
-        if (!shouldFallback) {
-          throw error;
+        if (shouldFallback) {
+          console.log("[/api/files/upload/chunked/init] user_data purpose rejected by deployment; retrying with assistants", {
+            filename,
+            size,
+            mimeType,
+            error,
+          });
+          continue;
         }
-        console.log("[/api/files/upload/chunked/init] user_data purpose rejected by deployment; retrying with assistants", {
+
+        console.log("[/api/files/upload/chunked/init] Uploads API init failed; switching to local strategy", {
           filename,
           size,
           mimeType,
+          purpose,
           error,
         });
+        return await createLocalFallbackSession(error);
       }
     }
     const uploadId = typeof upload?.id === "string" ? upload.id : "";
 
     if (!uploadId) {
-      console.log("[/api/files/upload/chunked/init] Uploads API returned no upload id", {
+      console.log("[/api/files/upload/chunked/init] Uploads API returned no upload id; switching to local strategy", {
         upload,
         filename,
       });
-      return NextResponse.json(
-        {
-          error: "Could not initialize chunked upload session.",
-          recovery: "Retry upload. If this persists, verify Uploads API support for this Azure deployment.",
-        },
-        { status: 502 },
-      );
+      return await createLocalFallbackSession({
+        reason: "missing_upload_id",
+        upload,
+      });
     }
 
     console.log("[/api/files/upload/chunked/init] Uploads session created", {

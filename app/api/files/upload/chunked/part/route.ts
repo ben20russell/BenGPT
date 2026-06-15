@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAzureClient, getAzureConfig, type UploadsApi } from "../../_lib";
+import {
+  LOCAL_UPLOAD_STRATEGY,
+  isLocalChunkedUploadId,
+  writeLocalChunkPart,
+} from "../local-store";
 
 export const runtime = "nodejs";
 
@@ -61,6 +66,32 @@ export async function POST(req: NextRequest) {
         },
         { status: 400 },
       );
+    }
+
+    if (isLocalChunkedUploadId(uploadId)) {
+      console.log("[/api/files/upload/chunked/part] Uploading part via local chunked fallback strategy", {
+        uploadId,
+        partIndex,
+        size: partField.size,
+        type: partField.type,
+      });
+      const localPart = await writeLocalChunkPart({
+        uploadId,
+        part: partField,
+        partIndexRaw: partIndex,
+      });
+      console.log("[/api/files/upload/chunked/part] Stored local chunked upload part", {
+        uploadId,
+        partIndex,
+        partId: localPart.partId,
+        bytes: localPart.bytes,
+      });
+      return NextResponse.json({
+        partId: localPart.partId,
+        uploadId,
+        partIndex: localPart.partIndex,
+        strategy: LOCAL_UPLOAD_STRATEGY,
+      });
     }
 
     console.log("[/api/files/upload/chunked/part] Uploading part", {

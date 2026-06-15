@@ -1,6 +1,7 @@
 /** @vitest-environment node */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { LOCAL_UPLOAD_ID_PREFIX, LOCAL_UPLOAD_STRATEGY } from "../local-store";
 
 const uploadsCreateSpy = vi.fn();
 
@@ -148,5 +149,29 @@ describe("POST /api/files/upload/chunked/init", () => {
         purpose: "assistants",
       }),
     );
+  });
+
+  it("falls back to local chunked upload session when uploads API init fails", async () => {
+    uploadsCreateSpy.mockRejectedValueOnce({
+      status: 500,
+      message: "Uploads API unavailable",
+    });
+
+    const req = new Request("http://localhost/api/files/upload/chunked/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "large-service-outage.pdf",
+        size: 6 * 1024 * 1024,
+        type: "application/pdf",
+      }),
+    });
+
+    const res = await POST(req as never);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(String(json.uploadId || "")).toContain(LOCAL_UPLOAD_ID_PREFIX);
+    expect(json.strategy).toBe(LOCAL_UPLOAD_STRATEGY);
   });
 });
