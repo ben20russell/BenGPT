@@ -456,38 +456,50 @@ export async function POST(req: NextRequest) {
     const inputFiles: ResponseInputFile[] = [];
 
     if (files.length > 0) {
-      const fileEntries = files.map((file, index) => {
-        const header = [
-          `File ${index + 1}: ${file.name || "untitled"}`,
-          `type=${file.type || "unknown"}`,
-          `size=${typeof file.size === "number" ? file.size : 0} bytes`,
-          `kind=${file.contentKind || "binary"}`,
-        ].join(" | ");
+      let attachedByIdCount = 0;
+      let attachedInlineBytesCount = 0;
+      const unresolvedEntries: string[] = [];
 
-        if (file.contentKind === "text" && file.contentText) {
-          return `${header}\nText content:\n${file.contentText}`;
-        }
-        if (file.contentKind === "binary" && typeof file.fileId === "string" && file.fileId.trim().length > 0) {
+      files.forEach((file, index) => {
+        const safeName = file.name || `document-${index + 1}`;
+        if (typeof file.fileId === "string" && file.fileId.trim().length > 0) {
           inputFiles.push({
             type: "input_file",
             file_id: file.fileId.trim(),
-            filename: file.name || `document-${index + 1}`,
+            filename: safeName,
             detail: "high",
           });
-          return `${header}\nFile attached by file_id for model parsing.`;
+          attachedByIdCount += 1;
+          return;
         }
-        if (file.contentKind === "binary" && file.contentBase64) {
+
+        if (typeof file.contentBase64 === "string" && file.contentBase64.trim().length > 0) {
           inputFiles.push({
             type: "input_file",
             file_data: normalizeBase64FileData(file.contentBase64, file.type),
-            filename: file.name || `document-${index + 1}`,
+            filename: safeName,
             detail: "high",
           });
-          return `${header}\nFile bytes included as structured file input for model parsing.`;
+          attachedInlineBytesCount += 1;
+          return;
         }
-        return `${header}\nNote: ${file.note || "No inline content provided."}`;
+
+        if (typeof file.contentText === "string" && file.contentText.trim().length > 0) {
+          unresolvedEntries.push(`File ${index + 1}: ${safeName}\nText content:\n${file.contentText}`);
+          return;
+        }
+
+        unresolvedEntries.push(`File ${index + 1}: ${safeName}\nNote: ${file.note || "No usable file content was provided."}`);
       });
-      contextSections.push(`Uploaded files:\n${fileEntries.join("\n\n")}`);
+
+      if (attachedByIdCount + attachedInlineBytesCount > 0) {
+        contextSections.push(
+          `Uploaded files attached for parsing: ${attachedByIdCount + attachedInlineBytesCount}.`,
+        );
+      }
+      if (unresolvedEntries.length > 0) {
+        contextSections.push(`Additional file context:\n${unresolvedEntries.join("\n\n")}`);
+      }
     }
 
     if (links.length > 0) {

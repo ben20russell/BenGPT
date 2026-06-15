@@ -28,13 +28,9 @@ const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string; summary: st
   { value: 'deep_research', label: 'Deep Research', summary: 'Runs deep multi-step research' },
 ];
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
-const MAX_TEXT_FILE_CHARS = 60000;
-const MAX_BINARY_INLINE_FILE_BYTES = 400 * 1024;
-const MAX_DIRECT_BINARY_UPLOAD_BYTES = 4 * 1024 * 1024;
+const DIRECT_UPLOAD_PREFERENCE_BYTES = 4 * 1024 * 1024;
 const CHUNKED_UPLOAD_PART_BYTES = 3 * 1024 * 1024;
-const MAX_CHAT_PAYLOAD_BYTES = 900 * 1024;
-const LARGE_BINARY_FILE_NOTE = `Binary content omitted because the file is too large for inline upload (${Math.round(MAX_BINARY_INLINE_FILE_BYTES / 1024)} KB max).`;
-const PAYLOAD_BUDGET_NOTE = 'Binary content omitted to keep the request size under the payload limit.';
+const MAX_PARALLEL_FILE_UPLOADS = 2;
 const FILE_UPLOAD_SUCCESS_NOTE = 'Uploaded to files API and attached by file_id.';
 
 function detectMobileViewport(): boolean {
@@ -149,13 +145,10 @@ type HistoryTurnPayload = {
 
 type ChatPayloadFile = {
   name: string;
-  type: string;
-  size: number;
-  contentKind: 'text' | 'binary';
+  contentKind?: 'text' | 'binary';
   contentText?: string;
   contentBase64?: string;
   fileId?: string;
-  note?: string;
 };
 
 type ChatRequestPayload = {
@@ -465,71 +458,10 @@ function isInfoRequestStep(text: string): boolean {
   return directInfoRequestPatterns.some((pattern) => pattern.test(value));
 }
 
-function isLikelyTextFile(file: File): boolean {
-  const mime = (file.type || '').toLowerCase();
-  if (mime.startsWith('text/')) return true;
-  if (
-    mime.includes('json') ||
-    mime.includes('xml') ||
-    mime.includes('yaml') ||
-    mime.includes('javascript') ||
-    mime.includes('typescript') ||
-    mime.includes('markdown')
-  ) {
-    return true;
-  }
-
-  const name = file.name.toLowerCase();
-  return /\.(txt|md|markdown|csv|json|xml|yaml|yml|js|ts|tsx|jsx|py|rb|go|rs|java|c|cpp|h|hpp|sh|sql|ini|toml|log)$/.test(
-    name,
-  );
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i] ?? 0);
-  }
-  return btoa(binary);
-}
-
 function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function readFileAsText(file: File): Promise<string> {
-  if (typeof file.text === 'function') {
-    return file.text();
-  }
-
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ''));
-    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file as text'));
-    reader.readAsText(file);
-  });
-}
-
-function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
-  if (typeof file.arrayBuffer === 'function') {
-    return file.arrayBuffer();
-  }
-
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (reader.result instanceof ArrayBuffer) {
-        resolve(reader.result);
-        return;
-      }
-      reject(new Error('Failed to read file as ArrayBuffer'));
-    };
-    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file as ArrayBuffer'));
-    reader.readAsArrayBuffer(file);
-  });
 }
 
 function getApiBase() {
@@ -687,7 +619,7 @@ async function uploadBinaryContextFileChunked(file: File): Promise<string> {
 }
 
 async function uploadBinaryContextFileSmart(file: File): Promise<string> {
-  if (file.size > MAX_DIRECT_BINARY_UPLOAD_BYTES) {
+  if (file.size > DIRECT_UPLOAD_PREFERENCE_BYTES) {
     return uploadBinaryContextFileChunked(file);
   }
 
@@ -713,64 +645,14 @@ async function uploadBinaryContextFileSmart(file: File): Promise<string> {
   }
 }
 
-function estimateUtf8Bytes(value: string): number {
-  if (typeof TextEncoder !== 'undefined') {
-    return new TextEncoder().encode(value).length;
-  }
-  return value.length;
-}
-
-function estimatePayloadBytes(payload: ChatRequestPayload): number {
-  return estimateUtf8Bytes(JSON.stringify(payload));
-}
-
-function appendNote(existing: string | undefined, addition: string): string {
-  if (!existing) return addition;
-  if (existing.includes(addition)) return existing;
-  return `${existing} ${addition}`.trim();
-}
-
 function mapUploadsToChatFiles(files: UploadedContextFile[]): ChatPayloadFile[] {
   return files.map((file) => ({
     name: file.name,
-    type: file.type,
-    size: file.size,
     contentKind: file.contentKind,
     contentText: file.contentText,
     contentBase64: file.contentBase64,
     fileId: file.fileId,
-    note: file.note,
   }));
-}
-
-function enforceChatPayloadBudget(input: ChatRequestPayload): {
-  payload: ChatRequestPayload;
-  trimmedBinaryCount: number;
-  estimatedBytes: number;
-} {
-  const files = input.files.map((file) => ({ ...file }));
-  const payload: ChatRequestPayload = {
-    ...input,
-    files,
-  };
-
-  let estimatedBytes = estimatePayloadBytes(payload);
-  let trimmedBinaryCount = 0;
-
-  if (estimatedBytes <= MAX_CHAT_PAYLOAD_BYTES) {
-    return { payload, trimmedBinaryCount, estimatedBytes };
-  }
-
-  for (let index = files.length - 1; index >= 0 && estimatedBytes > MAX_CHAT_PAYLOAD_BYTES; index -= 1) {
-    const file = files[index];
-    if (file.contentKind !== 'binary' || !file.contentBase64) continue;
-    file.note = appendNote(file.note, PAYLOAD_BUDGET_NOTE);
-    delete file.contentBase64;
-    trimmedBinaryCount += 1;
-    estimatedBytes = estimatePayloadBytes(payload);
-  }
-
-  return { payload, trimmedBinaryCount, estimatedBytes };
 }
 
 function buildPayloadForLogging(payload: ChatRequestPayload) {
@@ -791,6 +673,39 @@ function buildPayloadForLogging(payload: ChatRequestPayload) {
   };
 }
 
+async function settleUploadQueue(
+  files: File[],
+  worker: (file: File) => Promise<UploadedContextFile>,
+): Promise<PromiseSettledResult<UploadedContextFile>[]> {
+  if (files.length === 0) return [];
+
+  const results: PromiseSettledResult<UploadedContextFile>[] = new Array(files.length);
+  let cursor = 0;
+
+  const runWorker = async () => {
+    while (cursor < files.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        const value = await worker(files[index]);
+        results[index] = {
+          status: 'fulfilled',
+          value,
+        };
+      } catch (error) {
+        results[index] = {
+          status: 'rejected',
+          reason: error,
+        };
+      }
+    }
+  };
+
+  const workerCount = Math.min(MAX_PARALLEL_FILE_UPLOADS, files.length);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results;
+}
+
 async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
   const base: UploadedContextFile = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -801,68 +716,16 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
   };
 
   try {
-    if (isLikelyTextFile(file)) {
-      const text = await readFileAsText(file);
-      const trimmed = text.length > MAX_TEXT_FILE_CHARS ? text.slice(0, MAX_TEXT_FILE_CHARS) : text;
-      return {
-        ...base,
-        contentKind: 'text',
-        contentText: trimmed,
-        note: text.length > MAX_TEXT_FILE_CHARS ? 'Text truncated to 60,000 characters.' : undefined,
-      };
-    }
-
-    try {
-      const fileId = await uploadBinaryContextFileSmart(file);
-      return {
-        ...base,
-        contentKind: 'binary',
-        fileId,
-        note: FILE_UPLOAD_SUCCESS_NOTE,
-      };
-    } catch (uploadError) {
-      console.log('[UI] Binary file upload to files API failed; trying inline fallback when possible', {
-        name: file.name,
-        size: file.size,
-        error: uploadError,
-      });
-    }
-
-    if (file.size > MAX_BINARY_INLINE_FILE_BYTES) {
-      console.log('[UI] Binary file exceeds inline upload cap; attaching metadata only', {
-        name: file.name,
-        size: file.size,
-        maxInlineBytes: MAX_BINARY_INLINE_FILE_BYTES,
-      });
-      return {
-        ...base,
-        contentKind: 'binary',
-        note: `${LARGE_BINARY_FILE_NOTE} Upload to files API failed; try a smaller file or retry upload.`,
-      };
-    }
-
-    const data = await readFileAsArrayBuffer(file);
-    const base64 = arrayBufferToBase64(data);
+    const fileId = await uploadBinaryContextFileSmart(file);
     return {
       ...base,
       contentKind: 'binary',
-      contentBase64: base64,
-      note: 'Files API upload failed; using inline base64 fallback for model context.',
+      fileId,
+      note: FILE_UPLOAD_SUCCESS_NOTE,
     };
   } catch (error) {
-    console.log('[UI] Failed to parse uploaded file', { name: file.name, error });
-    const fallbackText = await readFileAsText(file).catch(() => '');
-    if (fallbackText) {
-      const trimmed = fallbackText.length > MAX_TEXT_FILE_CHARS ? fallbackText.slice(0, MAX_TEXT_FILE_CHARS) : fallbackText;
-      return {
-        ...base,
-        contentKind: 'text',
-        contentText: trimmed,
-        note: fallbackText.length > MAX_TEXT_FILE_CHARS ? 'Text truncated to 60,000 characters.' : 'Read as plain text fallback.',
-      };
-    }
-
-    throw new Error(`Could not read uploaded file content: ${file.name}`);
+    console.log('[UI] Failed to upload file to files API', { name: file.name, size: file.size, type: file.type, error });
+    throw new Error(`Could not upload file for model parsing: ${file.name}`);
   }
 }
 
@@ -1525,7 +1388,7 @@ export default function SearchInterface() {
     const files = Array.from(event.target.files ?? []);
     if (files.length === 0) return;
     console.log('[UI] File upload started', { count: files.length });
-    const results = await Promise.allSettled(files.map((file) => normalizeUploadFile(file)));
+    const results = await settleUploadQueue(files, normalizeUploadFile);
     const normalized = results
       .filter((result): result is PromiseFulfilledResult<UploadedContextFile> => result.status === 'fulfilled')
       .map((result) => result.value);
@@ -1534,33 +1397,19 @@ export default function SearchInterface() {
     if (normalized.length > 0) {
       setUploadedFiles((prev) => [...prev, ...normalized]);
     }
-    const metadataOnlyCount = normalized.filter(
-      (item) =>
-        item.contentKind === 'binary' &&
-        !item.fileId &&
-        !item.contentBase64 &&
-        typeof item.note === 'string' &&
-        item.note.toLowerCase().includes('too large'),
-    ).length;
     const uploadedByIdCount = normalized.filter((item) => item.contentKind === 'binary' && Boolean(item.fileId)).length;
     if (failures > 0) {
-      showToast(`Could not read ${failures} file${failures === 1 ? '' : 's'}. Try re-uploading.`);
+      showToast(`Could not upload ${failures} file${failures === 1 ? '' : 's'}. Try re-uploading.`);
     }
     if (uploadedByIdCount > 0) {
       showToast(
         `${uploadedByIdCount} file${uploadedByIdCount === 1 ? '' : 's'} uploaded successfully for full document parsing.`,
       );
     }
-    if (metadataOnlyCount > 0) {
-      showToast(
-        `${metadataOnlyCount} file${metadataOnlyCount === 1 ? '' : 's'} exceeded inline upload limits. Metadata was attached instead.`,
-      );
-    }
     console.log('[UI] File upload completed', {
       added: normalized.length,
       kinds: normalized.map((item) => item.contentKind),
       uploadedByIdCount,
-      metadataOnlyCount,
       failures,
     });
     event.target.value = '';
@@ -1854,11 +1703,11 @@ export default function SearchInterface() {
       abortControllerRef.current = controller;
 
       const missingBinaryUpload = filesSnapshot.filter(
-        (file) => file.contentKind === 'binary' && !file.fileId && !file.contentBase64,
+        (file) => file.contentKind === 'binary' && !file.fileId,
       );
       if (missingBinaryUpload.length > 0) {
         const fileNames = missingBinaryUpload.map((file) => file.name).slice(0, 3);
-        console.log('[UI] Blocking send because some binary files were not uploaded or inlined', {
+        console.log('[UI] Blocking send because some uploaded files are missing file IDs', {
           count: missingBinaryUpload.length,
           fileNames,
         });
@@ -1878,29 +1727,7 @@ export default function SearchInterface() {
         })),
         history: historyTurns,
       };
-      const { payload, trimmedBinaryCount, estimatedBytes } = enforceChatPayloadBudget(basePayload);
-
-      if (trimmedBinaryCount > 0) {
-        console.log('[UI] Trimmed binary attachments to fit payload budget', {
-          trimmedBinaryCount,
-          estimatedBytes,
-          maxBytes: MAX_CHAT_PAYLOAD_BYTES,
-        });
-        showToast(
-          `Removed binary bytes from ${trimmedBinaryCount} attachment${trimmedBinaryCount === 1 ? '' : 's'} to fit request size limits.`,
-        );
-      }
-
-      if (estimatedBytes > MAX_CHAT_PAYLOAD_BYTES) {
-        console.log('[UI] Chat payload exceeds max request budget after trimming', {
-          estimatedBytes,
-          maxBytes: MAX_CHAT_PAYLOAD_BYTES,
-          fileCount: payload.files.length,
-          historyTurnCount: payload.history.length,
-          gitSnippetCount: payload.gitSnippets.length,
-        });
-        throw new Error('This request is too large. Remove large attachments or shorten your context, then try again.');
-      }
+      const payload = basePayload;
 
       console.log('[UI] POST /api/chat request', buildPayloadForLogging(payload));
       const response = await fetch('/api/chat', {
@@ -1919,7 +1746,9 @@ export default function SearchInterface() {
       if (!response.ok) {
         console.log('[UI] /api/chat returned an error response', { status: response.status, json });
         if (response.status === 413) {
-          throw new Error('This request is too large. Remove large attachments or shorten your context, then try again.');
+          throw new Error(
+            'This request exceeded platform size limits. Start a new chat or reduce non-file context, then try again.',
+          );
         }
         const details = [json?.error, json?.recovery].filter(Boolean).join(' ');
         throw new Error(details || 'Request failed. Please try again.');

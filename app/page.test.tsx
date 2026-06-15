@@ -315,9 +315,25 @@ describe('SearchInterface', () => {
 
   it('sends uploaded files and git code context in /api/chat payload', async () => {
     const user = userEvent.setup();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ answer: 'Context-aware response', citations: [] }),
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload')) {
+        return {
+          ok: true,
+          json: async () => ({ fileId: 'file_text_uploaded_1' }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Context-aware response', citations: [] }),
+      };
     });
     const promptMock = vi
       .spyOn(window, 'prompt')
@@ -354,8 +370,9 @@ describe('SearchInterface', () => {
     ]);
     expect(payload.files).toHaveLength(1);
     expect(payload.files[0].name).toBe('notes.txt');
-    expect(payload.files[0].contentKind).toBe('text');
-    expect(String(payload.files[0].contentText || '')).toContain('hello file');
+    expect(payload.files[0].contentKind).toBe('binary');
+    expect(payload.files[0].fileId).toBe('file_text_uploaded_1');
+    expect(payload.files[0].contentText).toBeUndefined();
 
     promptMock.mockRestore();
   });
@@ -450,7 +467,6 @@ describe('SearchInterface', () => {
     expect(payload.files[0].contentKind).toBe('binary');
     expect(payload.files[0].fileId).toBe('file_pdf_large_1');
     expect(payload.files[0].contentBase64).toBeUndefined();
-    expect(String(payload.files[0].note || '')).toContain('Uploaded');
   });
 
   it('uploads very large PDFs through chunked upload endpoints to avoid 413 payload errors', async () => {
@@ -538,6 +554,58 @@ describe('SearchInterface', () => {
     expect(directCalls).toHaveLength(0);
   });
 
+  it('does not apply a client-side cap to how many files can be attached in one message', async () => {
+    const user = userEvent.setup();
+    let uploadCounter = 0;
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload')) {
+        uploadCounter += 1;
+        return {
+          ok: true,
+          json: async () => ({ fileId: `file_many_${uploadCounter}` }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'All files attached', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const files = Array.from({ length: 25 }, (_, index) => {
+      const number = index + 1;
+      return new File([`document-${number}`], `doc-${number}.txt`, { type: 'text/plain' });
+    });
+
+    await user.upload(screen.getByTestId('file-input'), files);
+    await waitFor(() => {
+      expect(uploadCounter).toBe(25);
+    });
+
+    await user.type(screen.getByTestId('message-input'), 'Analyze all uploaded docs');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    const payload = JSON.parse(String(init.body));
+    expect(payload.files).toHaveLength(25);
+    expect(payload.files.every((file: { fileId?: string }) => typeof file.fileId === 'string' && file.fileId.length > 0)).toBe(true);
+  });
+
   it('shows a recovery message when /api/chat returns request-too-large', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn().mockResolvedValue({
@@ -552,8 +620,8 @@ describe('SearchInterface', () => {
     await user.type(screen.getByTestId('message-input'), 'Trigger request-too-large');
     await user.click(screen.getByTestId('send-btn'));
 
-    expect(await screen.findByText(/request is too large/i)).toBeInTheDocument();
-    expect(screen.getByText(/remove large attachments/i)).toBeInTheDocument();
+    expect(await screen.findByText(/exceeded platform size limits/i)).toBeInTheDocument();
+    expect(screen.getByText(/start a new chat or reduce non-file context/i)).toBeInTheDocument();
   });
 
   it('renders trending suggestions from the hourly prompts endpoint', async () => {

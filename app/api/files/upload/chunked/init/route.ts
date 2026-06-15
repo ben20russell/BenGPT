@@ -4,7 +4,6 @@ import {
   coerceSafeFilename,
   createAzureClient,
   getAzureConfig,
-  MAX_UPLOAD_BYTES,
   type UploadsApi,
 } from "../../_lib";
 
@@ -51,21 +50,6 @@ export async function POST(req: NextRequest) {
         {
           error: "Chunked upload requires a positive file size.",
           recovery: "Retry upload with a valid file.",
-        },
-        { status: 400 },
-      );
-    }
-
-    if (size > MAX_UPLOAD_BYTES) {
-      console.log("[/api/files/upload/chunked/init] Validation failed: size exceeds upload maximum", {
-        size,
-        maxUploadBytes: MAX_UPLOAD_BYTES,
-        filename,
-      });
-      return NextResponse.json(
-        {
-          error: "File is larger than the supported upload maximum.",
-          recovery: "Choose a smaller file and try again.",
         },
         { status: 400 },
       );
