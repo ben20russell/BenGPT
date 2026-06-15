@@ -267,6 +267,20 @@ describe('SearchInterface', () => {
     expect(screen.getByText('Runs deep multi-step research')).toBeInTheDocument();
   });
 
+  it('renders reasoning intensity options in the requested order', async () => {
+    const user = userEvent.setup();
+    render(<SearchInterface />);
+
+    await user.click(screen.getByTestId('tools-preferences-btn'));
+
+    const options = screen.getAllByTestId(/^reasoning-intensity-option-/).map((element) => {
+      const title = element.querySelector('.tool-dropdown-item-title');
+      return title?.textContent?.trim();
+    });
+
+    expect(options).toEqual(['Auto', 'Low', 'Medium', 'High', 'Max']);
+  });
+
   it('does not show More Route Info in composer menus', async () => {
     const user = userEvent.setup();
     render(<SearchInterface />);
@@ -310,6 +324,34 @@ describe('SearchInterface', () => {
     expect(JSON.parse(String(init.body))).toMatchObject({
       query: 'Research this deeply',
       mode: 'deep_research',
+    });
+  });
+
+  it('sends selected reasoning intensity in /api/chat payload', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ answer: 'Reasoning tuned', citations: [] }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    await user.click(screen.getByTestId('tools-preferences-btn'));
+    await user.click(screen.getByTestId('reasoning-intensity-option-low'));
+    await user.type(screen.getByTestId('message-input'), 'Use lower reasoning');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      query: 'Use lower reasoning',
+      mode: 'web_search',
+      reasoningIntensity: 'low',
     });
   });
 
@@ -375,6 +417,50 @@ describe('SearchInterface', () => {
     expect(payload.files[0].contentText).toBeUndefined();
 
     promptMock.mockRestore();
+  });
+
+  it('shows per-file upload status before sending a search', async () => {
+    const user = userEvent.setup();
+    let resolveUpload: ((value: { ok: boolean; json: () => Promise<{ fileId: string }> }) => void) | null = null;
+    const uploadResponse = new Promise<{ ok: boolean; json: () => Promise<{ fileId: string }> }>((resolve) => {
+      resolveUpload = resolve;
+    });
+
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload')) {
+        return uploadResponse;
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'ok', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const pdfFile = new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], 'status-check.pdf', { type: 'application/pdf' });
+    await user.upload(screen.getByTestId('file-input'), pdfFile);
+
+    expect(await screen.findByText(/status-check\.pdf/i)).toBeInTheDocument();
+    expect(screen.getByTestId('context-file-status')).toHaveTextContent('Uploading...');
+
+    resolveUpload?.({
+      ok: true,
+      json: async () => ({ fileId: 'file_status_uploaded_1' }),
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-file-status')).toHaveTextContent('Uploaded');
+    });
   });
 
   it('sends binary document uploads as binary content instead of metadata-only', async () => {

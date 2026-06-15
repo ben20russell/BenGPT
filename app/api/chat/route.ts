@@ -7,6 +7,7 @@ import { toUserFacingChatError } from "./error-mapper";
 
 type SearchContextSize = "low" | "medium" | "high";
 type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+type ReasoningIntensityInput = "auto" | ReasoningEffort;
 type TextVerbosity = "low" | "medium" | "high";
 
 type SearchMode = "web_search" | "thinking" | "deep_research";
@@ -37,6 +38,7 @@ type ChatRequestBody = {
   query?: string;
   message?: string;
   mode?: SearchMode;
+  reasoningIntensity?: ReasoningIntensityInput;
   useMemory?: boolean;
   files?: UploadContextFile[];
   links?: string[];
@@ -352,6 +354,48 @@ function parseSearchMode(rawMode: unknown): SearchMode {
   return "web_search";
 }
 
+function parseReasoningIntensity(raw: unknown): ReasoningIntensityInput {
+  if (raw === "low" || raw === "medium" || raw === "high" || raw === "xhigh" || raw === "auto") {
+    return raw;
+  }
+  return "auto";
+}
+
+function supportsMaxReasoningForDeployment(deployment: string | undefined): boolean {
+  const normalized = String(deployment || "").toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes("gpt-5")) return true;
+  if (normalized.includes("o3")) return true;
+  if (normalized.includes("o4")) return true;
+  return false;
+}
+
+function resolveReasoningEffort(input: {
+  searchMode: SearchMode;
+  requested: ReasoningIntensityInput;
+  deployment: string | undefined;
+}): ReasoningEffort | undefined {
+  const { searchMode, requested, deployment } = input;
+  const preset = SEARCH_PRESETS[searchMode];
+  const base = preset.reasoning?.effort;
+  if (!base) return undefined;
+
+  const requestedEffort = requested === "auto" ? base : requested;
+  if (requestedEffort !== "xhigh") {
+    return requestedEffort;
+  }
+
+  if (supportsMaxReasoningForDeployment(deployment)) {
+    return requestedEffort;
+  }
+
+  console.log("[/api/chat] Requested max reasoning is not supported by deployment; capping to high", {
+    deployment,
+    searchMode,
+  });
+  return "high";
+}
+
 function normalizeAzureEndpoint(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const trimmed = raw.trim().replace(/\/+$/, "");
@@ -391,6 +435,7 @@ export async function POST(req: NextRequest) {
     const gitSnippets = Array.isArray(body.gitSnippets) ? body.gitSnippets : [];
     const history = Array.isArray(body.history) ? body.history : [];
     const searchMode = parseSearchMode(body.mode);
+    const requestedReasoningIntensity = parseReasoningIntensity(body.reasoningIntensity);
     const useMemory = resolveUseMemory(body.useMemory);
 
     if (!text && files.length === 0 && links.length === 0 && gitSnippets.length === 0) {
@@ -421,6 +466,7 @@ export async function POST(req: NextRequest) {
 
     console.log("[/api/chat] Calling Azure OpenAI responses.create", {
       searchMode,
+      requestedReasoningIntensity,
       endpoint: config.endpoint,
       apiVersion: config.apiVersion,
       deployment: config.deployment,
@@ -529,13 +575,24 @@ export async function POST(req: NextRequest) {
     };
 
     const preset = SEARCH_PRESETS[searchMode];
+    const reasoningEffort = resolveReasoningEffort({
+      searchMode,
+      requested: requestedReasoningIntensity,
+      deployment: config.deployment,
+    });
+    console.log("[/api/chat] Reasoning intensity resolved", {
+      searchMode,
+      requestedReasoningIntensity,
+      reasoningEffort,
+      deployment: config.deployment,
+    });
     const instructions = await buildInstructionsWithOptionalMemory(useMemory, text);
     const baseRequest: ChatResponsesRequest = {
       model: config.deployment,
       instructions,
       tools: preset.tools,
       tool_choice: preset.tool_choice,
-      reasoning: preset.reasoning,
+      reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
       text: preset.text,
       input: [inputMessage],
     };

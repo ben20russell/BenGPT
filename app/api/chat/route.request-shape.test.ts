@@ -74,6 +74,55 @@ describe("POST /api/chat request shape", () => {
     expect(firstCall.input?.[0]).not.toHaveProperty("id");
   });
 
+  it("applies requested reasoning intensity when provided by the client", async () => {
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "ok",
+      output: [],
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query: "Be quick", mode: "thinking", reasoningIntensity: "low" }),
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+
+    const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
+      reasoning?: { effort?: string };
+    };
+    expect(firstCall.reasoning?.effort).toBe("low");
+  });
+
+  it("caps max reasoning to high for non GPT-5 style deployments", async () => {
+    process.env.AZURE_OPENAI_DEPLOYMENT = "gpt-4o";
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "ok",
+      output: [],
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query: "Think deeply", mode: "deep_research", reasoningIntensity: "xhigh" }),
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+
+    const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
+      reasoning?: { effort?: string };
+    };
+    expect(firstCall.reasoning?.effort).toBe("high");
+  });
+
   it("sends a formatting instruction that enforces a Claude-like response structure", async () => {
     execFileMock.mockImplementation(
       (_file: string, _args: string[], _opts: unknown, callback: (error: Error | null, stdout?: string) => void) => {

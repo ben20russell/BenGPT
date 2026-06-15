@@ -14,6 +14,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 
 type SearchMode = 'web_search' | 'thinking' | 'deep_research';
+type ReasoningIntensity = 'auto' | 'low' | 'medium' | 'high' | 'xhigh';
 type MobileBrowser =
   | 'ios-safari'
   | 'android-chrome'
@@ -26,6 +27,13 @@ const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string; summary: st
   { value: 'web_search', label: 'Web Search', summary: 'Finds current info quickly' },
   { value: 'thinking', label: 'Thinking', summary: 'Solves complex problems' },
   { value: 'deep_research', label: 'Deep Research', summary: 'Runs deep multi-step research' },
+];
+const REASONING_INTENSITY_OPTIONS: Array<{ value: ReasoningIntensity; label: string; summary: string }> = [
+  { value: 'auto', label: 'Auto', summary: 'Uses the model-default reasoning for this mode' },
+  { value: 'low', label: 'Low', summary: 'Faster responses with lighter reasoning' },
+  { value: 'medium', label: 'Medium', summary: 'Balanced depth and speed' },
+  { value: 'high', label: 'High', summary: 'More deliberate reasoning' },
+  { value: 'xhigh', label: 'Max', summary: 'Deepest reasoning; can be slower' },
 ];
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
 const DIRECT_UPLOAD_PREFERENCE_BYTES = 4 * 1024 * 1024;
@@ -131,6 +139,16 @@ type UploadedContextFile = {
   note?: string;
 };
 
+type FileUploadStatus = 'uploading' | 'uploaded' | 'failed';
+
+type FileUploadStatusItem = {
+  id: string;
+  name: string;
+  size: number;
+  status: FileUploadStatus;
+  error?: string;
+};
+
 type GitCodeContext = {
   id: string;
   label: string;
@@ -154,6 +172,7 @@ type ChatPayloadFile = {
 type ChatRequestPayload = {
   query: string;
   mode: SearchMode;
+  reasoningIntensity?: ReasoningIntensity;
   useMemory: boolean;
   files: ChatPayloadFile[];
   gitSnippets: Array<{ label: string; code: string }>;
@@ -688,7 +707,7 @@ function buildPayloadForLogging(payload: ChatRequestPayload) {
 
 async function settleUploadQueue(
   files: File[],
-  worker: (file: File) => Promise<UploadedContextFile>,
+  worker: (file: File, index: number) => Promise<UploadedContextFile>,
 ): Promise<PromiseSettledResult<UploadedContextFile>[]> {
   if (files.length === 0) return [];
 
@@ -700,7 +719,7 @@ async function settleUploadQueue(
       const index = cursor;
       cursor += 1;
       try {
-        const value = await worker(files[index]);
+        const value = await worker(files[index], index);
         results[index] = {
           status: 'fulfilled',
           value,
@@ -719,9 +738,9 @@ async function settleUploadQueue(
   return results;
 }
 
-async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
+async function normalizeUploadFile(file: File, uploadId?: string): Promise<UploadedContextFile> {
   const base: UploadedContextFile = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: uploadId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: file.name || 'untitled',
     type: file.type || 'application/octet-stream',
     size: file.size,
@@ -918,10 +937,12 @@ export default function SearchInterface() {
   const [pendingTurnId, setPendingTurnId] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedContextFile[]>([]);
+  const [fileUploadStatuses, setFileUploadStatuses] = useState<FileUploadStatusItem[]>([]);
   const [gitSnippets, setGitSnippets] = useState<GitCodeContext[]>([]);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const [toolsMenuType, setToolsMenuType] = useState<'add' | 'preferences'>('add');
   const [searchMode, setSearchMode] = useState<SearchMode>('web_search');
+  const [reasoningIntensity, setReasoningIntensity] = useState<ReasoningIntensity>('auto');
   const [useMemory, setUseMemory] = useState(true);
   const [welcomeSuggestions, setWelcomeSuggestions] = useState<string[]>(FALLBACK_WELCOME_SUGGESTIONS);
 
@@ -1223,6 +1244,15 @@ export default function SearchInterface() {
     return selected.label;
   }
 
+  function getReasoningLabel(intensity: ReasoningIntensity) {
+    const selected = REASONING_INTENSITY_OPTIONS.find((option) => option.value === intensity);
+    if (!selected) {
+      console.log('[UI] Unexpected reasoning intensity encountered; defaulting to Auto', intensity);
+      return 'Auto';
+    }
+    return selected.label;
+  }
+
   function createConversation(title: string): string {
     const newId = String(Date.now());
     const newConversation: Conversation = {
@@ -1382,6 +1412,19 @@ export default function SearchInterface() {
   }
 
   const hasContext = uploadedFiles.length > 0 || gitSnippets.length > 0;
+  const hasVisibleContextChips = fileUploadStatuses.length > 0 || gitSnippets.length > 0;
+
+  function getFileUploadStatusLabel(status: FileUploadStatus): string {
+    if (status === 'uploading') return 'Uploading...';
+    if (status === 'uploaded') return 'Uploaded';
+    return 'Failed';
+  }
+
+  function removeFileContextById(fileId: string) {
+    console.log('[UI] Removing uploaded file context chip', { fileId });
+    setUploadedFiles((prev) => prev.filter((item) => item.id !== fileId));
+    setFileUploadStatuses((prev) => prev.filter((item) => item.id !== fileId));
+  }
 
   function buildContextSummaryText() {
     const parts: string[] = [];
@@ -1401,11 +1444,55 @@ export default function SearchInterface() {
     const files = Array.from(event.target.files ?? []);
     if (files.length === 0) return;
     console.log('[UI] File upload started', { count: files.length });
-    const results = await settleUploadQueue(files, normalizeUploadFile);
+
+    const pendingStatusEntries: FileUploadStatusItem[] = files.map((file, index) => ({
+      id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+      name: file.name || 'untitled',
+      size: file.size,
+      status: 'uploading',
+    }));
+    setFileUploadStatuses((prev) => [...prev, ...pendingStatusEntries]);
+    console.log('[UI] Added pending upload statuses', {
+      count: pendingStatusEntries.length,
+      names: pendingStatusEntries.map((item) => item.name),
+    });
+
+    const results = await settleUploadQueue(files, (file, index) =>
+      normalizeUploadFile(file, pendingStatusEntries[index]?.id),
+    );
     const normalized = results
       .filter((result): result is PromiseFulfilledResult<UploadedContextFile> => result.status === 'fulfilled')
       .map((result) => result.value);
     const failures = results.filter((result) => result.status === 'rejected').length;
+
+    const statusUpdatesById = new Map<string, { status: FileUploadStatus; error?: string }>();
+    results.forEach((result, index) => {
+      const pending = pendingStatusEntries[index];
+      if (!pending) return;
+
+      if (result.status === 'fulfilled') {
+        statusUpdatesById.set(pending.id, { status: 'uploaded' });
+        return;
+      }
+
+      const errorMessage =
+        result.reason instanceof Error ? result.reason.message : 'Upload failed';
+      statusUpdatesById.set(pending.id, {
+        status: 'failed',
+        error: errorMessage,
+      });
+    });
+    setFileUploadStatuses((prev) =>
+      prev.map((item) => {
+        const update = statusUpdatesById.get(item.id);
+        if (!update) return item;
+        return {
+          ...item,
+          status: update.status,
+          error: update.error,
+        };
+      }),
+    );
 
     if (normalized.length > 0) {
       setUploadedFiles((prev) => [...prev, ...normalized]);
@@ -1672,6 +1759,7 @@ export default function SearchInterface() {
 
     console.log('[UI] Sending message', {
       mode: searchMode,
+      reasoningIntensity,
       length: userText.length,
       fileCount: filesSnapshot.length,
       gitSnippetCount: gitSnippetsSnapshot.length,
@@ -1732,6 +1820,7 @@ export default function SearchInterface() {
       const basePayload: ChatRequestPayload = {
         query: userText,
         mode: searchMode,
+        reasoningIntensity,
         useMemory,
         files: mapUploadsToChatFiles(filesSnapshot),
         gitSnippets: gitSnippetsSnapshot.map((snippet) => ({
@@ -1788,6 +1877,7 @@ export default function SearchInterface() {
         })),
       );
       setUploadedFiles([]);
+      setFileUploadStatuses([]);
       setGitSnippets([]);
 
       console.log('[UI] Message completed successfully', {
@@ -2214,17 +2304,24 @@ export default function SearchInterface() {
                   onChange={onFileInputChange}
                 />
 
-                {hasContext ? (
+                {hasVisibleContextChips ? (
                   <div className="context-chips" data-testid="context-chips">
-                    {uploadedFiles.map((file) => (
-                      <div className="context-chip" key={file.id}>
+                    {fileUploadStatuses.map((file) => (
+                      <div className={`context-chip status-${file.status}`} key={file.id} data-testid={`context-file-chip-${file.id}`}>
                         <span className="context-chip-label">
                           File: {file.name} ({formatBytes(file.size)})
+                        </span>
+                        <span
+                          className={`context-chip-status status-${file.status}`}
+                          data-testid="context-file-status"
+                          title={file.error || undefined}
+                        >
+                          {getFileUploadStatusLabel(file.status)}
                         </span>
                         <button
                           type="button"
                           className="context-chip-remove"
-                          onClick={() => setUploadedFiles((prev) => prev.filter((item) => item.id !== file.id))}
+                          onClick={() => removeFileContextById(file.id)}
                         >
                           ×
                         </button>
@@ -2300,12 +2397,16 @@ export default function SearchInterface() {
                       </span>
                     </button>
                     <span className="composer-mode-label" data-testid="composer-mode-label">
-                      {getModeLabel(searchMode)}
+                      {getModeLabel(searchMode)} · {getReasoningLabel(reasoningIntensity)}
                     </span>
                     {toolsMenuOpen ? (
                       <div className="tool-dropdown-menu" data-testid="tools-dropdown-menu" role="menu">
-                        {toolsMenuType === 'preferences'
-                          ? SEARCH_MODE_OPTIONS.map((option) => (
+                        {toolsMenuType === 'preferences' ? (
+                          <>
+                            <div className="tool-dropdown-section-label" data-testid="search-mode-section-label">
+                              Search mode
+                            </div>
+                            {SEARCH_MODE_OPTIONS.map((option) => (
                               <button
                                 key={option.value}
                                 type="button"
@@ -2320,8 +2421,28 @@ export default function SearchInterface() {
                                 <span className="tool-dropdown-item-title">{option.label}</span>
                                 <span className="tool-dropdown-item-summary">{option.summary}</span>
                               </button>
-                            ))
-                          : null}
+                            ))}
+                            <div className="tool-dropdown-section-label" data-testid="reasoning-intensity-section-label">
+                              Reasoning
+                            </div>
+                            {REASONING_INTENSITY_OPTIONS.map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                className={`tool-dropdown-item ${reasoningIntensity === option.value ? 'active' : ''}`}
+                                data-testid={`reasoning-intensity-option-${option.value}`}
+                                onClick={() => {
+                                  console.log('[UI] Reasoning intensity changed', { reasoningIntensity: option.value });
+                                  setReasoningIntensity(option.value);
+                                  setToolsMenuOpen(false);
+                                }}
+                              >
+                                <span className="tool-dropdown-item-title">{option.label}</span>
+                                <span className="tool-dropdown-item-summary">{option.summary}</span>
+                              </button>
+                            ))}
+                          </>
+                        ) : null}
                         {toolsMenuType === 'add' ? (
                           <>
                             <button
@@ -2848,6 +2969,36 @@ export default function SearchInterface() {
           font-size: 12px;
           overflow-wrap: anywhere;
         }
+        .context-chip.status-failed {
+          border-color: #fecaca;
+          background: #fff7f7;
+        }
+        .context-chip-status {
+          display: inline-flex;
+          align-items: center;
+          padding: 1px 8px;
+          border-radius: 999px;
+          border: 1px solid transparent;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.01em;
+          white-space: nowrap;
+        }
+        .context-chip-status.status-uploading {
+          background: #fff7ed;
+          color: #9a3412;
+          border-color: #fed7aa;
+        }
+        .context-chip-status.status-uploaded {
+          background: #ecfdf3;
+          color: #166534;
+          border-color: #86efac;
+        }
+        .context-chip-status.status-failed {
+          background: #fef2f2;
+          color: #b91c1c;
+          border-color: #fecaca;
+        }
         .context-chip-remove {
           border: none;
           background: transparent;
@@ -2976,6 +3127,14 @@ export default function SearchInterface() {
           display: flex;
           flex-direction: column;
           gap: 2px;
+        }
+        .tool-dropdown-section-label {
+          padding: 8px 10px 4px;
+          color: #6b7280;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
         }
         .tool-dropdown-item {
           border: none;
