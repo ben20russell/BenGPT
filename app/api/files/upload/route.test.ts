@@ -111,4 +111,49 @@ describe("POST /api/files/upload", () => {
       }),
     );
   });
+
+  it("falls back when Azure marks purpose as invalid via param metadata", async () => {
+    filesCreateSpy
+      .mockRejectedValueOnce({
+        status: 400,
+        message: "Bad request payload",
+        code: "invalid_value",
+        param: "purpose",
+      })
+      .mockResolvedValueOnce({
+        id: "file_pdf_uploaded_param_fallback_1",
+      });
+
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], "param-fallback.pdf", {
+        type: "application/pdf",
+      }),
+    );
+
+    const req = new Request("http://localhost/api/files/upload", {
+      method: "POST",
+      body: formData,
+    });
+
+    const res = await POST(req as never);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.fileId).toBe("file_pdf_uploaded_param_fallback_1");
+    expect(filesCreateSpy).toHaveBeenCalledTimes(2);
+    expect(filesCreateSpy).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        purpose: "user_data",
+      }),
+    );
+    expect(filesCreateSpy).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        purpose: "assistants",
+      }),
+    );
+  });
 });

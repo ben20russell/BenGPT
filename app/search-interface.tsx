@@ -42,7 +42,12 @@ const MAX_PARALLEL_FILE_UPLOADS = 2;
 const FILE_UPLOAD_SUCCESS_NOTE = 'Uploaded to files API and attached by file_id.';
 const DEFAULT_SEARCH_MODE: SearchMode = 'web_search';
 const DEFAULT_REASONING_INTENSITY: ReasoningIntensity = 'auto';
+const DEFAULT_CHAT_MODEL_LABEL = 'Unknown model';
 const COMPOSER_PREFERENCES_STORAGE_KEY = 'beacon-search-composer-preferences:v1';
+
+type SearchInterfaceProps = {
+  chatModel?: string;
+};
 
 type PersistedComposerPreferences = {
   searchMode?: SearchMode;
@@ -115,6 +120,13 @@ function resolveInitialComposerPreferences(): ResolvedComposerPreferences {
     console.log('[UI] Failed to restore composer preferences from local storage; using defaults', { error });
     return fallback;
   }
+}
+
+function resolveChatModelLabel(chatModel: string | undefined): string {
+  const normalized = (chatModel || '').trim();
+  if (!normalized) return DEFAULT_CHAT_MODEL_LABEL;
+  if (normalized.toLowerCase().includes('gpt-5.5')) return 'GPT-5.5';
+  return normalized;
 }
 
 function detectMobileViewport(): boolean {
@@ -998,12 +1010,13 @@ class UIErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> 
   }
 }
 
-export default function SearchInterface() {
+export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}) {
   const [toast, setToast] = useState('');
   const [isUiBooted, setIsUiBooted] = useState(process.env.NODE_ENV === 'test');
   const [deviceId] = useState(initializeDeviceId);
   const [recentsHydrated, setRecentsHydrated] = useState(false);
   const initialComposerPreferences = useMemo(() => resolveInitialComposerPreferences(), []);
+  const resolvedChatModelLabel = useMemo(() => resolveChatModelLabel(chatModel), [chatModel]);
 
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
   const [isMobileUserAgent] = useState(detectMobileUserAgent);
@@ -2644,6 +2657,9 @@ export default function SearchInterface() {
                         {toolsMenuType === 'reasoning' ? (
                           <>
                             <div className="tool-dropdown-section-label" data-testid="reasoning-intensity-section-label">
+                              <span className="reasoning-model-name" data-testid="reasoning-model-name">
+                                {resolvedChatModelLabel}
+                              </span>{' '}
                               Reasoning
                             </div>
                             {REASONING_INTENSITY_OPTIONS.map((option) => (
@@ -3405,6 +3421,9 @@ export default function SearchInterface() {
           font-weight: 700;
           letter-spacing: 0.04em;
           text-transform: uppercase;
+        }
+        .reasoning-model-name {
+          color: #374151;
         }
         .tool-dropdown-item {
           border: none;

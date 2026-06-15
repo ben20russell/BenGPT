@@ -294,6 +294,17 @@ describe('SearchInterface', () => {
     expect(options).toEqual(['Auto', 'Low', 'Medium', 'High', 'Max']);
   });
 
+  it('shows GPT-5.5 before the Reasoning label in the reasoning menu', async () => {
+    const user = userEvent.setup();
+    render(<SearchInterface chatModel="ben-gpt-5.5" />);
+
+    await user.click(screen.getByTestId('tools-reasoning-btn'));
+
+    const sectionLabel = screen.getByTestId('reasoning-intensity-section-label');
+    expect(sectionLabel).toHaveTextContent('GPT-5.5 Reasoning');
+    expect(screen.getByTestId('reasoning-model-name')).toHaveTextContent('GPT-5.5');
+  });
+
   it('does not show More Route Info in composer menus', async () => {
     const user = userEvent.setup();
     render(<SearchInterface />);

@@ -71,16 +71,38 @@ export function isPurposeRejectedError(error: unknown): boolean {
   const maybe = error as {
     status?: number;
     message?: string;
+    code?: string;
+    param?: string;
     error?: { message?: string; code?: string };
   };
   const status = typeof maybe?.status === "number" ? maybe.status : undefined;
   const merged = `${String(maybe?.message || "")} ${String(maybe?.error?.message || "")}`.toLowerCase();
+  const rawParam = maybe?.param;
+  const rawCode = maybe?.code ?? maybe?.error?.code;
+  const normalizedParam = typeof rawParam === "string" ? rawParam.trim().toLowerCase() : "";
+  const normalizedCode = typeof rawCode === "string" ? rawCode.trim().toLowerCase() : "";
+
   if (status !== 400 && status !== 422) return false;
+
+  if (normalizedParam === "purpose") {
+    return true;
+  }
+
   const mentionsPurpose = merged.includes("purpose");
   const mentionsInvalidity =
     merged.includes("invalid") ||
     merged.includes("unsupported") ||
     merged.includes("not supported") ||
     merged.includes("allowed");
+  const codeSuggestsInvalidValue =
+    normalizedCode.includes("invalid") ||
+    normalizedCode.includes("unsupported") ||
+    normalizedCode.includes("not_allowed") ||
+    normalizedCode.includes("bad_request");
+
+  if (mentionsPurpose && (mentionsInvalidity || codeSuggestsInvalidValue)) {
+    return true;
+  }
+
   return mentionsPurpose && mentionsInvalidity;
 }

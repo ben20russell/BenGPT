@@ -107,4 +107,46 @@ describe("POST /api/files/upload/chunked/init", () => {
       }),
     );
   });
+
+  it("falls back when Azure marks purpose as invalid via param metadata", async () => {
+    uploadsCreateSpy
+      .mockRejectedValueOnce({
+        status: 400,
+        message: "Bad request payload",
+        code: "invalid_value",
+        param: "purpose",
+      })
+      .mockResolvedValueOnce({
+        id: "upload_param_fallback_1",
+      });
+
+    const req = new Request("http://localhost/api/files/upload/chunked/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "param-fallback-large.pdf",
+        size: 8 * 1024 * 1024,
+        type: "application/pdf",
+      }),
+    });
+
+    const res = await POST(req as never);
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.uploadId).toBe("upload_param_fallback_1");
+    expect(uploadsCreateSpy).toHaveBeenCalledTimes(2);
+    expect(uploadsCreateSpy).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        purpose: "user_data",
+      }),
+    );
+    expect(uploadsCreateSpy).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        purpose: "assistants",
+      }),
+    );
+  });
 });
