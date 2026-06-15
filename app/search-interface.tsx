@@ -38,12 +38,18 @@ const REASONING_INTENSITY_OPTIONS: Array<{ value: ReasoningIntensity; label: str
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
 const DIRECT_UPLOAD_PREFERENCE_BYTES = 4 * 1024 * 1024;
 const CHUNKED_UPLOAD_PART_BYTES = 3 * 1024 * 1024;
+const MAX_CHUNKED_PART_UPLOAD_ATTEMPTS = 3;
+const CHUNKED_PART_RETRY_BASE_DELAY_MS = 350;
+const DIRECT_UPLOAD_SAFE_PDF_PART_BYTES = 3_750_000;
+const MAX_PDF_SPLIT_PARTS = 24;
 const MAX_PARALLEL_FILE_UPLOADS = 2;
 const FILE_UPLOAD_SUCCESS_NOTE = 'Uploaded to files API and attached by file_id.';
 const LARGE_FILE_UPLOAD_FAILURE_REASON =
   'Large file upload failed because chunked uploads are unavailable and direct uploads exceeded payload limits.';
 const LARGE_FILE_UPLOAD_FAILURE_TOAST =
   'Large file upload failed: chunked uploads are unavailable and direct uploads exceeded payload limits. Try a smaller PDF or retry shortly.';
+const LARGE_FILE_UPLOAD_SPLIT_SUCCESS_NOTE =
+  'Large PDF uploaded by splitting into smaller parts for full document parsing.';
 const DEFAULT_SEARCH_MODE: SearchMode = 'web_search';
 const DEFAULT_REASONING_INTENSITY: ReasoningIntensity = 'auto';
 const DEFAULT_CHAT_MODEL_LABEL = 'Unknown model';
@@ -236,6 +242,8 @@ type UploadedContextFile = {
   contentText?: string;
   contentBase64?: string;
   fileId?: string;
+  fileIds?: string[];
+  splitPartNames?: string[];
   note?: string;
 };
 
@@ -615,6 +623,28 @@ async function parseUploadJson(response: Response) {
     | null;
 }
 
+function shouldRetryChunkedPartStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function isNetworkLikeChunkUploadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error || '').toLowerCase();
+  return (
+    message.includes('network') ||
+    message.includes('fetch') ||
+    message.includes('timeout') ||
+    message.includes('econn') ||
+    message.includes('connection') ||
+    message.includes('socket')
+  );
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 async function uploadBinaryContextFile(file: File): Promise<string> {
   const formData = new FormData();
   formData.append('file', file, file.name || 'upload.bin');
@@ -686,25 +716,74 @@ async function uploadBinaryContextFileChunked(file: File): Promise<string> {
   for (let start = 0, partIndex = 0; start < file.size; start += CHUNKED_UPLOAD_PART_BYTES, partIndex += 1) {
     const end = Math.min(start + CHUNKED_UPLOAD_PART_BYTES, file.size);
     const partBlob = file.slice(start, end);
-    const formData = new FormData();
-    formData.append('uploadId', uploadId);
-    formData.append('partIndex', String(partIndex));
-    formData.append('part', partBlob, `${file.name || 'upload.bin'}.part-${partIndex}`);
+    let partId = '';
 
-    const partResponse = await fetch(partEndpoint, {
-      method: 'POST',
-      body: formData,
-    });
-    const partJson = await parseUploadJson(partResponse);
-    if (!partResponse.ok) {
-      const details = [partJson?.error, partJson?.recovery].filter(Boolean).join(' ');
-      throw new Error(details || `Chunked part upload failed with status ${partResponse.status}`);
+    for (let attempt = 1; attempt <= MAX_CHUNKED_PART_UPLOAD_ATTEMPTS; attempt += 1) {
+      const formData = new FormData();
+      formData.append('uploadId', uploadId);
+      formData.append('partIndex', String(partIndex));
+      formData.append('part', partBlob, `${file.name || 'upload.bin'}.part-${partIndex}`);
+
+      try {
+        const partResponse = await fetch(partEndpoint, {
+          method: 'POST',
+          body: formData,
+        });
+        const partJson = await parseUploadJson(partResponse);
+        if (!partResponse.ok) {
+          const details = [partJson?.error, partJson?.recovery].filter(Boolean).join(' ');
+          if (
+            attempt < MAX_CHUNKED_PART_UPLOAD_ATTEMPTS &&
+            shouldRetryChunkedPartStatus(partResponse.status)
+          ) {
+            const retryDelayMs = CHUNKED_PART_RETRY_BASE_DELAY_MS * attempt;
+            console.log('[UI] Chunked part upload failed with retryable status; retrying part upload', {
+              name: file.name,
+              uploadId,
+              partIndex,
+              attempt,
+              maxAttempts: MAX_CHUNKED_PART_UPLOAD_ATTEMPTS,
+              status: partResponse.status,
+              retryDelayMs,
+              details,
+            });
+            await sleep(retryDelayMs);
+            continue;
+          }
+
+          throw new Error(details || `Chunked part upload failed with status ${partResponse.status}`);
+        }
+
+        partId = typeof partJson?.partId === 'string' ? partJson.partId : '';
+        if (!partId) {
+          throw new Error(`Chunked part upload returned no partId for part ${partIndex}`);
+        }
+
+        break;
+      } catch (error) {
+        if (attempt < MAX_CHUNKED_PART_UPLOAD_ATTEMPTS && isNetworkLikeChunkUploadError(error)) {
+          const retryDelayMs = CHUNKED_PART_RETRY_BASE_DELAY_MS * attempt;
+          console.log('[UI] Chunked part upload hit network-like error; retrying part upload', {
+            name: file.name,
+            uploadId,
+            partIndex,
+            attempt,
+            maxAttempts: MAX_CHUNKED_PART_UPLOAD_ATTEMPTS,
+            retryDelayMs,
+            error,
+          });
+          await sleep(retryDelayMs);
+          continue;
+        }
+
+        throw error;
+      }
     }
 
-    const partId = typeof partJson?.partId === 'string' ? partJson.partId : '';
     if (!partId) {
-      throw new Error(`Chunked part upload returned no partId for part ${partIndex}`);
+      throw new Error(`Chunked part upload failed after retries for part ${partIndex}`);
     }
+
     partIds.push(partId);
   }
 
@@ -805,14 +884,234 @@ async function uploadBinaryContextFileSmart(file: File): Promise<string> {
   }
 }
 
-function mapUploadsToChatFiles(files: UploadedContextFile[]): ChatPayloadFile[] {
-  return files.map((file) => ({
+function isPdfFile(file: File): boolean {
+  const mimeType = (file.type || '').toLowerCase();
+  if (mimeType === 'application/pdf') return true;
+  return (file.name || '').toLowerCase().endsWith('.pdf');
+}
+
+function getPdfBaseName(fileName: string): string {
+  const trimmed = fileName.trim() || 'upload.pdf';
+  if (/\.pdf$/i.test(trimmed)) {
+    return trimmed.slice(0, -4);
+  }
+  return trimmed;
+}
+
+async function readBlobArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
+  if (typeof blob.arrayBuffer === 'function') {
+    return blob.arrayBuffer();
+  }
+  if (typeof FileReader !== 'undefined') {
+    return await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (result instanceof ArrayBuffer) {
+          resolve(result);
+          return;
+        }
+        reject(new Error('FileReader did not return an ArrayBuffer.'));
+      };
+      reader.onerror = () => {
+        reject(reader.error || new Error('Failed to read blob bytes.'));
+      };
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  return new Response(blob as BlobPart).arrayBuffer();
+}
+
+async function buildPdfPartFile(input: {
+  sourcePdf: {
+    copyPages: (sourceDoc: unknown, indices: number[]) => Promise<unknown[]>;
+  };
+  pageIndices: number[];
+  sourceName: string;
+  partNumber: number;
+}): Promise<File> {
+  const { PDFDocument } = await import('pdf-lib');
+  const partPdf = await PDFDocument.create();
+  const copiedPages = await partPdf.copyPages(input.sourcePdf as never, input.pageIndices);
+  copiedPages.forEach((copiedPage) => {
+    partPdf.addPage(copiedPage as never);
+  });
+  const partBytes = await partPdf.save({
+    useObjectStreams: false,
+  });
+  const normalizedPartBytes = new Uint8Array(partBytes.byteLength);
+  normalizedPartBytes.set(partBytes);
+  const baseName = getPdfBaseName(input.sourceName);
+  return new File([normalizedPartBytes], `${baseName} (Part ${input.partNumber}).pdf`, {
+    type: 'application/pdf',
+  });
+}
+
+async function splitLargePdfForDirectUpload(file: File): Promise<File[]> {
+  const { PDFDocument } = await import('pdf-lib');
+  const sourceBytes = await readBlobArrayBuffer(file);
+  console.log('[UI] Preparing to split large PDF for direct upload fallback', {
     name: file.name,
-    contentKind: file.contentKind,
-    contentText: file.contentText,
-    contentBase64: file.contentBase64,
-    fileId: file.fileId,
-  }));
+    size: file.size,
+    type: file.type,
+    sourceByteLength: sourceBytes.byteLength,
+  });
+  const sourcePdf = await PDFDocument.load(sourceBytes, {
+    ignoreEncryption: true,
+  });
+  const pageCount = sourcePdf.getPageCount();
+  if (pageCount < 2) {
+    throw new Error('Large PDF could not be split because it has fewer than 2 pages.');
+  }
+
+  const parts: File[] = [];
+  let currentPartPages: number[] = [];
+
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    const candidatePages = [...currentPartPages, pageIndex];
+    const candidatePart = await buildPdfPartFile({
+      sourcePdf: sourcePdf as never,
+      pageIndices: candidatePages,
+      sourceName: file.name || 'upload.pdf',
+      partNumber: parts.length + 1,
+    });
+
+    if (candidatePart.size <= DIRECT_UPLOAD_SAFE_PDF_PART_BYTES) {
+      currentPartPages = candidatePages;
+      continue;
+    }
+
+    if (currentPartPages.length === 0) {
+      throw new Error(`PDF page ${pageIndex + 1} exceeds direct upload limits even alone.`);
+    }
+
+    const finalizedPart = await buildPdfPartFile({
+      sourcePdf: sourcePdf as never,
+      pageIndices: currentPartPages,
+      sourceName: file.name || 'upload.pdf',
+      partNumber: parts.length + 1,
+    });
+    parts.push(finalizedPart);
+    currentPartPages = [pageIndex];
+
+    if (parts.length > MAX_PDF_SPLIT_PARTS) {
+      throw new Error(`Large PDF split exceeded ${MAX_PDF_SPLIT_PARTS} parts.`);
+    }
+  }
+
+  if (currentPartPages.length > 0) {
+    const finalPart = await buildPdfPartFile({
+      sourcePdf: sourcePdf as never,
+      pageIndices: currentPartPages,
+      sourceName: file.name || 'upload.pdf',
+      partNumber: parts.length + 1,
+    });
+    parts.push(finalPart);
+  }
+
+  if (
+    parts.length === 1 &&
+    pageCount > 1 &&
+    file.size > DIRECT_UPLOAD_SAFE_PDF_PART_BYTES
+  ) {
+    const midpoint = Math.ceil(pageCount / 2);
+    const firstHalfIndices = Array.from({ length: midpoint }, (_, index) => index);
+    const secondHalfIndices = Array.from({ length: pageCount - midpoint }, (_, index) => midpoint + index);
+
+    const forcedParts: File[] = [];
+    const firstHalfPart = await buildPdfPartFile({
+      sourcePdf: sourcePdf as never,
+      pageIndices: firstHalfIndices,
+      sourceName: file.name || 'upload.pdf',
+      partNumber: 1,
+    });
+    forcedParts.push(firstHalfPart);
+    if (secondHalfIndices.length > 0) {
+      const secondHalfPart = await buildPdfPartFile({
+        sourcePdf: sourcePdf as never,
+        pageIndices: secondHalfIndices,
+        sourceName: file.name || 'upload.pdf',
+        partNumber: 2,
+      });
+      forcedParts.push(secondHalfPart);
+    }
+
+    const allForcedPartsSafe = forcedParts.every((part) => part.size <= DIRECT_UPLOAD_SAFE_PDF_PART_BYTES);
+    if (allForcedPartsSafe && forcedParts.length > 1) {
+      console.log('[UI] Large PDF split fallback forced multi-part page split', {
+        name: file.name,
+        originalSize: file.size,
+        pageCount,
+        forcedPartSizes: forcedParts.map((part) => part.size),
+      });
+      parts.splice(0, parts.length, ...forcedParts);
+    }
+  }
+
+  return parts.map((part, index) => {
+    const baseName = getPdfBaseName(file.name || 'upload.pdf');
+    return new File([part], `${baseName} (Part ${index + 1} of ${parts.length}).pdf`, {
+      type: 'application/pdf',
+    });
+  });
+}
+
+async function uploadLargePdfViaClientSplit(file: File): Promise<{ fileIds: string[]; partNames: string[] }> {
+  const partFiles = await splitLargePdfForDirectUpload(file);
+  const fileIds: string[] = [];
+  const partNames: string[] = [];
+
+  console.log('[UI] Attempting large PDF client-side split fallback upload', {
+    name: file.name,
+    originalSize: file.size,
+    partCount: partFiles.length,
+    partSizes: partFiles.map((part) => part.size),
+  });
+
+  for (const partFile of partFiles) {
+    if (partFile.size > DIRECT_UPLOAD_SAFE_PDF_PART_BYTES) {
+      throw new Error(`Split part is still too large for direct upload: ${partFile.name}`);
+    }
+    const fileId = await uploadBinaryContextFile(partFile);
+    fileIds.push(fileId);
+    partNames.push(partFile.name);
+  }
+
+  console.log('[UI] Large PDF client-side split fallback upload succeeded', {
+    name: file.name,
+    originalSize: file.size,
+    partCount: partFiles.length,
+    fileIds,
+  });
+
+  return {
+    fileIds,
+    partNames,
+  };
+}
+
+function mapUploadsToChatFiles(files: UploadedContextFile[]): ChatPayloadFile[] {
+  return files.flatMap<ChatPayloadFile>((file) => {
+    const splitFileIds = Array.isArray(file.fileIds) ? file.fileIds.filter((value) => typeof value === 'string' && value.length > 0) : [];
+    if (splitFileIds.length > 0) {
+      const splitPartNames = Array.isArray(file.splitPartNames) ? file.splitPartNames : [];
+      return splitFileIds.map((fileId, index) => ({
+        name: splitPartNames[index] || `${file.name} (Part ${index + 1} of ${splitFileIds.length})`,
+        contentKind: 'binary' as const,
+        fileId,
+      }));
+    }
+
+    const fallbackFile: ChatPayloadFile = {
+      name: file.name,
+      contentKind: file.contentKind,
+      contentText: file.contentText,
+      contentBase64: file.contentBase64,
+      fileId: file.fileId,
+    };
+    return [fallbackFile];
+  });
 }
 
 function buildPayloadForLogging(payload: ChatRequestPayload) {
@@ -861,7 +1160,16 @@ async function settleUploadQueue(
     }
   };
 
-  const workerCount = Math.min(MAX_PARALLEL_FILE_UPLOADS, files.length);
+  const hasLargeFile = files.some((file) => file.size > DIRECT_UPLOAD_PREFERENCE_BYTES);
+  const preferredWorkerCount = hasLargeFile ? 1 : MAX_PARALLEL_FILE_UPLOADS;
+  const workerCount = Math.min(preferredWorkerCount, files.length);
+  if (hasLargeFile && files.length > 1) {
+    console.log('[UI] Large file detected in upload batch; serializing uploads for reliability', {
+      fileCount: files.length,
+      workerCount,
+      thresholdBytes: DIRECT_UPLOAD_PREFERENCE_BYTES,
+    });
+  }
   await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
   return results;
 }
@@ -886,6 +1194,27 @@ async function normalizeUploadFile(file: File, uploadId?: string): Promise<Uploa
   } catch (error) {
     console.log('[UI] Failed to upload file to files API', { name: file.name, size: file.size, type: file.type, error });
     const reason = error instanceof Error ? error.message : 'Unknown upload error';
+    const looksLikeLargePayloadChainFailure = reason.toLowerCase().includes(LARGE_FILE_UPLOAD_FAILURE_REASON.toLowerCase());
+
+    if (looksLikeLargePayloadChainFailure && isPdfFile(file)) {
+      try {
+        const splitUpload = await uploadLargePdfViaClientSplit(file);
+        return {
+          ...base,
+          contentKind: 'binary',
+          fileIds: splitUpload.fileIds,
+          splitPartNames: splitUpload.partNames,
+          note: LARGE_FILE_UPLOAD_SPLIT_SUCCESS_NOTE,
+        };
+      } catch (splitError) {
+        console.log('[UI] Large PDF client-side split fallback failed', {
+          name: file.name,
+          size: file.size,
+          splitError,
+        });
+      }
+    }
+
     throw new Error(`Could not upload file for model parsing: ${file.name}. ${reason}`);
   }
 }
@@ -1689,7 +2018,16 @@ export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}
     if (normalized.length > 0) {
       setUploadedFiles((prev) => [...prev, ...normalized]);
     }
-    const uploadedByIdCount = normalized.filter((item) => item.contentKind === 'binary' && Boolean(item.fileId)).length;
+    const uploadedByIdCount = normalized.reduce((count, item) => {
+      if (item.contentKind !== 'binary') return count;
+      if (Array.isArray(item.fileIds) && item.fileIds.length > 0) {
+        return count + item.fileIds.length;
+      }
+      if (typeof item.fileId === 'string' && item.fileId.length > 0) {
+        return count + 1;
+      }
+      return count;
+    }, 0);
     if (failures > 0) {
       if (hasLargeFilePayloadLimitFailure) {
         console.log('[UI] Showing precise upload failure toast for chunked-init outage + direct payload limit path', {
@@ -2021,7 +2359,10 @@ export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}
       abortControllerRef.current = controller;
 
       const missingBinaryUpload = filesSnapshot.filter(
-        (file) => file.contentKind === 'binary' && !file.fileId,
+        (file) =>
+          file.contentKind === 'binary' &&
+          !file.fileId &&
+          !(Array.isArray(file.fileIds) && file.fileIds.length > 0),
       );
       if (missingBinaryUpload.length > 0) {
         const fileNames = missingBinaryUpload.map((file) => file.name).slice(0, 3);

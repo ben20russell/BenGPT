@@ -159,6 +159,27 @@ type SearchPreset = {
   };
 };
 
+type UploadedFileDescriptor = {
+  fileId: string;
+  name: string;
+};
+
+type UploadedFileReadinessIssueReason =
+  | "still_processing"
+  | "processing_failed"
+  | "deleted"
+  | "unknown";
+
+type UploadedFileReadinessIssue = UploadedFileDescriptor & {
+  reason: UploadedFileReadinessIssueReason;
+  detail?: string;
+};
+
+type UploadedFileReadinessResult = {
+  readyFiles: UploadedFileDescriptor[];
+  unavailableFiles: UploadedFileReadinessIssue[];
+};
+
 const SEARCH_PRESETS: Record<SearchMode, SearchPreset> = {
   web_search: {
     tools: [
@@ -258,10 +279,57 @@ function normalizeFileStatus(raw: unknown): string {
   return String(raw || "").trim().toLowerCase();
 }
 
+function normalizeErrorText(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message.trim();
+  }
+  return String(error || "").trim();
+}
+
+function classifyReadinessIssueReason(input: {
+  status?: string;
+  error?: unknown;
+}): UploadedFileReadinessIssueReason {
+  const normalizedStatus = normalizeFileStatus(input.status);
+  if (normalizedStatus === "error") return "processing_failed";
+  if (normalizedStatus === "deleted") return "deleted";
+  if (normalizedStatus === "processing" || normalizedStatus === "in_progress") return "still_processing";
+
+  const message = normalizeErrorText(input.error).toLowerCase();
+  if (!message) return "unknown";
+  if (message.includes("deleted")) return "deleted";
+  if (message.includes("file_input_failed") || message.includes("status:error")) return "processing_failed";
+  if (
+    message.includes("giving up on waiting for file") ||
+    message.includes("still processing") ||
+    message.includes("processing") ||
+    message.includes("timeout")
+  ) {
+    return "still_processing";
+  }
+  return "unknown";
+}
+
+function describeReadinessIssueForContext(issue: UploadedFileReadinessIssue): string {
+  if (issue.reason === "still_processing") {
+    return "still processing";
+  }
+  if (issue.reason === "processing_failed") {
+    return "not processable";
+  }
+  if (issue.reason === "deleted") {
+    return "no longer available (deleted)";
+  }
+  return "temporarily unavailable";
+}
+
 async function waitForUploadedFilesToBeReady(
   client: FilesReadinessApi,
-  files: Array<{ fileId: string; name: string }>,
-): Promise<void> {
+  files: UploadedFileDescriptor[],
+): Promise<UploadedFileReadinessResult> {
+  const readyFiles: UploadedFileDescriptor[] = [];
+  const unavailableFiles: UploadedFileReadinessIssue[] = [];
+
   for (const file of files) {
     try {
       console.log("[/api/chat] Waiting for uploaded file processing before parsing", {
@@ -276,25 +344,53 @@ async function waitForUploadedFilesToBeReady(
       });
       const status = normalizeFileStatus(ready?.status);
       if (status === "error" || status === "deleted") {
-        throw new Error(`FILE_INPUT_FAILED:${file.name}:${status || "unknown"}`);
+        const issue: UploadedFileReadinessIssue = {
+          fileId: file.fileId,
+          name: file.name,
+          reason: classifyReadinessIssueReason({
+            status,
+          }),
+          detail: normalizeErrorText(ready?.status_details),
+        };
+        unavailableFiles.push(issue);
+        console.log("[/api/chat] Uploaded file is unavailable for parsing in this request", {
+          fileId: file.fileId,
+          name: file.name,
+          status: status || "unknown",
+          reason: issue.reason,
+          detail: issue.detail,
+        });
+        continue;
       }
       console.log("[/api/chat] Uploaded file is ready for parsing", {
         fileId: file.fileId,
         name: file.name,
         status: status || "unknown",
       });
+      readyFiles.push(file);
     } catch (error) {
+      const issue: UploadedFileReadinessIssue = {
+        fileId: file.fileId,
+        name: file.name,
+        reason: classifyReadinessIssueReason({
+          error,
+        }),
+        detail: normalizeErrorText(error),
+      };
+      unavailableFiles.push(issue);
       console.log("[/api/chat] Uploaded file was not ready for parsing", {
         fileId: file.fileId,
         name: file.name,
+        reason: issue.reason,
         error,
       });
-      if (error instanceof Error && error.message.startsWith("FILE_INPUT_FAILED:")) {
-        throw error;
-      }
-      throw new Error(`FILE_INPUT_NOT_READY:${file.name}`);
     }
   }
+
+  return {
+    readyFiles,
+    unavailableFiles,
+  };
 }
 
 function resolveUseMemory(raw: unknown): boolean {
@@ -599,9 +695,29 @@ export async function POST(req: NextRequest) {
           name: (file.name || `document-${index + 1}`).trim() || `document-${index + 1}`,
         };
       })
-      .filter((item): item is { fileId: string; name: string } => Boolean(item));
+      .filter((item): item is UploadedFileDescriptor => Boolean(item));
+    const readyFileIds = new Set<string>();
+    const unavailableFilesById = new Map<string, UploadedFileReadinessIssue>();
     if (filesWithIds.length > 0) {
-      await waitForUploadedFilesToBeReady(client as unknown as FilesReadinessApi, filesWithIds);
+      const readiness = await waitForUploadedFilesToBeReady(client as unknown as FilesReadinessApi, filesWithIds);
+      readiness.readyFiles.forEach((file) => {
+        readyFileIds.add(file.fileId);
+      });
+      readiness.unavailableFiles.forEach((file) => {
+        unavailableFilesById.set(file.fileId, file);
+      });
+      if (readiness.unavailableFiles.length > 0) {
+        console.log("[/api/chat] Proceeding with partial attachment readiness", {
+          requestedFileCount: filesWithIds.length,
+          readyFileCount: readiness.readyFiles.length,
+          unavailableFileCount: readiness.unavailableFiles.length,
+          unavailableFiles: readiness.unavailableFiles.map((item) => ({
+            fileId: item.fileId,
+            name: item.name,
+            reason: item.reason,
+          })),
+        });
+      }
     }
 
     const contextSections: string[] = [];
@@ -629,10 +745,24 @@ export async function POST(req: NextRequest) {
 
       files.forEach((file, index) => {
         const safeName = file.name || `document-${index + 1}`;
-        if (typeof file.fileId === "string" && file.fileId.trim().length > 0) {
+        const fileId = typeof file.fileId === "string" ? file.fileId.trim() : "";
+        if (fileId.length > 0) {
+          const readinessIssue = unavailableFilesById.get(fileId);
+          if (readinessIssue) {
+            unresolvedEntries.push(
+              `File ${index + 1}: ${safeName}\nNote: Uploaded by file ID but unavailable for parsing in this request because it is ${describeReadinessIssueForContext(readinessIssue)}.`,
+            );
+            return;
+          }
+          if (readyFileIds.size > 0 && !readyFileIds.has(fileId)) {
+            unresolvedEntries.push(
+              `File ${index + 1}: ${safeName}\nNote: Uploaded by file ID but unavailable for parsing in this request.`,
+            );
+            return;
+          }
           inputFiles.push({
             type: "input_file",
-            file_id: file.fileId.trim(),
+            file_id: fileId,
             filename: safeName,
             detail: "high",
           });

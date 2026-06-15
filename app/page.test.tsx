@@ -38,6 +38,30 @@ describe('SearchInterface', () => {
     mockMobileViewport(false);
   });
 
+  async function createLargeValidPdfFile(name: string): Promise<File> {
+    const { PDFDocument, StandardFonts } = await import('pdf-lib');
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+
+    for (let pageIndex = 0; pageIndex < 8; pageIndex += 1) {
+      const page = pdf.addPage([612, 792]);
+      page.drawText(`Large PDF test page ${pageIndex + 1}`, {
+        x: 36,
+        y: 756,
+        size: 18,
+        font,
+      });
+    }
+
+    const pdfBytes = await pdf.save({ useObjectStreams: false });
+    // Append trailing bytes so the source file exceeds direct upload limits while remaining PDF-loadable.
+    const trailingPadding = new Uint8Array(5 * 1024 * 1024).fill(7);
+    const combined = new Uint8Array(pdfBytes.length + trailingPadding.length);
+    combined.set(pdfBytes, 0);
+    combined.set(trailingPadding, pdfBytes.length);
+    return new File([combined], name, { type: 'application/pdf' });
+  }
+
   const popularMobileBrowsers = [
     {
       label: 'iOS Safari',
@@ -691,6 +715,102 @@ describe('SearchInterface', () => {
     expect(directCalls).toHaveLength(0);
   });
 
+  it('retries chunked part uploads when a transient part endpoint error occurs', async () => {
+    const user = userEvent.setup();
+    let partAttemptCounter = 0;
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload/chunked/init')) {
+        return {
+          ok: true,
+          json: async () => ({ uploadId: 'upload_retry_parts_1' }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/part')) {
+        partAttemptCounter += 1;
+        if (partAttemptCounter === 1) {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({
+              error: 'Temporary chunk storage failure.',
+              recovery: 'Retry the same chunk request.',
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({ partId: `retryable_part_${partAttemptCounter}` }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/complete')) {
+        return {
+          ok: true,
+          json: async () => ({ fileId: 'file_retry_parts_final_1' }),
+        };
+      }
+
+      if (url.includes('/api/files/upload')) {
+        throw new Error('direct upload should not be used when chunked part retries recover');
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Chunked part retry worked', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const hugePdfBytes = new Uint8Array(6 * 1024 * 1024 + 512);
+    const hugePdfFile = new File([hugePdfBytes], 'chunked-part-retry.pdf', { type: 'application/pdf' });
+    await user.upload(screen.getByTestId('file-input'), hugePdfFile);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-file-status')).toHaveTextContent('Uploaded');
+    });
+
+    await user.type(screen.getByTestId('message-input'), 'Analyze this file with part retry');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    const payload = JSON.parse(String(init.body));
+    expect(payload.files).toHaveLength(1);
+    expect(payload.files[0].name).toBe('chunked-part-retry.pdf');
+    expect(payload.files[0].contentKind).toBe('binary');
+    expect(payload.files[0].fileId).toBe('file_retry_parts_final_1');
+
+    const initCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/api/files/upload/chunked/init'));
+    const partCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/api/files/upload/chunked/part'));
+    const completeCalls = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes('/api/files/upload/chunked/complete'),
+    );
+    const directCalls = fetchMock.mock.calls.filter(
+      (call) =>
+        String(call[0]).includes('/api/files/upload') &&
+        !String(call[0]).includes('/api/files/upload/chunked/'),
+    );
+
+    expect(initCalls).toHaveLength(1);
+    expect(partCalls.length).toBeGreaterThan(3);
+    expect(completeCalls).toHaveLength(1);
+    expect(directCalls).toHaveLength(0);
+  });
+
   it('falls back to direct upload when chunked init fails for a large PDF', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
@@ -853,6 +973,95 @@ describe('SearchInterface', () => {
     expect(initCalls).toHaveLength(1);
     expect(partCalls.length).toBeGreaterThan(0);
     expect(completeCalls).toHaveLength(1);
+  });
+
+  it('uploads large PDFs by splitting into direct-uploadable PDF parts when chunked init is unavailable', async () => {
+    const user = userEvent.setup();
+    let oversizeAttemptCount = 0;
+    let splitPartUploadCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload/chunked/init')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            error: 'Could not start chunked upload.',
+            recovery: 'Uploads API is unavailable for this deployment.',
+          }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/part')) {
+        throw new Error('chunked part should not be called when init fails');
+      }
+
+      if (url.includes('/api/files/upload/chunked/complete')) {
+        throw new Error('chunked complete should not be called when init fails');
+      }
+
+      if (url.includes('/api/files/upload')) {
+        const body = init?.body;
+        const formData = body instanceof FormData ? body : null;
+        const uploaded = formData?.get('file');
+        const size = uploaded instanceof File ? uploaded.size : 0;
+
+        if (size > 4 * 1024 * 1024) {
+          oversizeAttemptCount += 1;
+          return {
+            ok: false,
+            status: 413,
+            json: async () => ({
+              error: 'Payload too large',
+              recovery: 'Direct upload request body exceeded deployment limits.',
+            }),
+          };
+        }
+
+        splitPartUploadCount += 1;
+        return {
+          ok: true,
+          json: async () => ({ fileId: `file_split_part_${splitPartUploadCount}` }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Split upload worked', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const hugePdfFile = await createLargeValidPdfFile('split-large.pdf');
+    expect(hugePdfFile.size).toBeGreaterThan(4 * 1024 * 1024);
+    await user.upload(screen.getByTestId('file-input'), hugePdfFile);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-file-status')).toHaveTextContent('Uploaded');
+    });
+
+    await user.type(screen.getByTestId('message-input'), 'Use split upload path');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    const payload = JSON.parse(String(init.body));
+    expect(payload.files.length).toBeGreaterThan(1);
+    expect(payload.files.every((file: { fileId?: string }) => String(file.fileId || '').startsWith('file_split_part_'))).toBe(true);
+    expect(oversizeAttemptCount).toBe(1);
+    expect(splitPartUploadCount).toBeGreaterThan(1);
   });
 
   it('shows a precise toast when large file upload hits chunked-init outage and direct payload limits', async () => {

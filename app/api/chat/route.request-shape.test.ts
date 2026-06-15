@@ -352,10 +352,10 @@ describe("POST /api/chat request shape", () => {
     expect(inputFile).not.toHaveProperty("file_data");
   });
 
-  it("returns 500 when uploaded file is not ready in time for parsing", async () => {
+  it("continues without attaching file_id when uploaded file is not ready in time for parsing", async () => {
     filesWaitForProcessingSpy.mockRejectedValue(new Error("Giving up on waiting for file file_pdf_slow to finish processing"));
     responsesCreateSpy.mockResolvedValue({
-      output_text: "should-not-run",
+      output_text: "Recovered without file_id attachment",
       output: [],
     });
 
@@ -379,12 +379,81 @@ describe("POST /api/chat request shape", () => {
     });
 
     const res = await POST(req as never);
-    const body = (await res.json()) as { error?: string; recovery?: string };
 
-    expect(res.status).toBe(500);
-    expect(responsesCreateSpy).not.toHaveBeenCalled();
-    expect(String(body.error || "").toLowerCase()).toContain("file");
-    expect(String(body.recovery || "").toLowerCase()).toContain("upload");
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+    const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const firstMessage = firstCall.input?.[0];
+    const inputText = String(firstMessage?.content?.find((item) => item.type === "input_text")?.text || "");
+    const inputFile = firstMessage?.content?.find((item) => item.type === "input_file");
+    expect(inputText.toLowerCase()).toContain("still processing");
+    expect(inputFile).toBeUndefined();
+  });
+
+  it("attaches ready files and degrades gracefully for unready files", async () => {
+    filesWaitForProcessingSpy.mockImplementation(async (id: string) => {
+      if (id === "file_pdf_ready") {
+        return {
+          id,
+          status: "processed",
+        };
+      }
+      throw new Error("Giving up on waiting for file file_pdf_slow to finish processing");
+    });
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "Used ready attachment and noted unavailable file",
+      output: [],
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Analyze both files",
+        files: [
+          {
+            name: "ready.pdf",
+            type: "application/pdf",
+            size: 1111,
+            contentKind: "binary",
+            fileId: "file_pdf_ready",
+          },
+          {
+            name: "slow.pdf",
+            type: "application/pdf",
+            size: 2222,
+            contentKind: "binary",
+            fileId: "file_pdf_slow",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+    const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const firstMessage = firstCall.input?.[0];
+    const inputText = String(firstMessage?.content?.find((item) => item.type === "input_text")?.text || "");
+    const inputFiles = (firstMessage?.content?.filter((item) => item.type === "input_file") || []) as Array<{
+      file_id?: string;
+      filename?: string;
+    }>;
+
+    expect(inputFiles).toHaveLength(1);
+    expect(inputFiles[0]).toMatchObject({
+      file_id: "file_pdf_ready",
+      filename: "ready.pdf",
+    });
+    expect(inputText.toLowerCase()).toContain("slow.pdf");
+    expect(inputText.toLowerCase()).toContain("still processing");
   });
 
   it("normalizes raw base64 PDF bytes into a data URL when file_data is used", async () => {
