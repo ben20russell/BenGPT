@@ -940,7 +940,7 @@ export default function SearchInterface() {
   const [fileUploadStatuses, setFileUploadStatuses] = useState<FileUploadStatusItem[]>([]);
   const [gitSnippets, setGitSnippets] = useState<GitCodeContext[]>([]);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
-  const [toolsMenuType, setToolsMenuType] = useState<'add' | 'preferences'>('add');
+  const [toolsMenuType, setToolsMenuType] = useState<'add' | 'preferences' | 'reasoning'>('add');
   const [searchMode, setSearchMode] = useState<SearchMode>('web_search');
   const [reasoningIntensity, setReasoningIntensity] = useState<ReasoningIntensity>('auto');
   const [useMemory, setUseMemory] = useState(true);
@@ -1542,6 +1542,11 @@ export default function SearchInterface() {
   function showPreferencesMenu() {
     setToolsMenuType('preferences');
     setToolsMenuOpen((prev) => (toolsMenuType === 'preferences' ? !prev : true));
+  }
+
+  function showReasoningMenu() {
+    setToolsMenuType('reasoning');
+    setToolsMenuOpen((prev) => (toolsMenuType === 'reasoning' ? !prev : true));
   }
 
   function insertActionableNextStep(step: string) {
@@ -2396,8 +2401,25 @@ export default function SearchInterface() {
                         <span className="prefs-line prefs-line-bottom" />
                       </span>
                     </button>
+                    <button
+                      type="button"
+                      className="tool-circle-btn"
+                      data-testid="tools-reasoning-btn"
+                      aria-label="Open reasoning menu"
+                      title="Reasoning"
+                      aria-haspopup="menu"
+                      aria-expanded={toolsMenuOpen}
+                      onClick={showReasoningMenu}
+                    >
+                      <span className="reasoning-glyph" aria-hidden="true">
+                        R
+                      </span>
+                    </button>
                     <span className="composer-mode-label" data-testid="composer-mode-label">
-                      {getModeLabel(searchMode)} · {getReasoningLabel(reasoningIntensity)}
+                      {getModeLabel(searchMode)}
+                    </span>
+                    <span className="composer-reasoning-label" data-testid="composer-reasoning-label">
+                      {getReasoningLabel(reasoningIntensity)}
                     </span>
                     {toolsMenuOpen ? (
                       <div className="tool-dropdown-menu" data-testid="tools-dropdown-menu" role="menu">
@@ -2422,6 +2444,10 @@ export default function SearchInterface() {
                                 <span className="tool-dropdown-item-summary">{option.summary}</span>
                               </button>
                             ))}
+                          </>
+                        ) : null}
+                        {toolsMenuType === 'reasoning' ? (
+                          <>
                             <div className="tool-dropdown-section-label" data-testid="reasoning-intensity-section-label">
                               Reasoning
                             </div>
@@ -3058,6 +3084,16 @@ export default function SearchInterface() {
           margin-left: 2px;
           user-select: none;
         }
+        .composer-reasoning-label {
+          font-size: 14px;
+          color: #475569;
+          line-height: 1;
+          padding: 4px 8px;
+          border: 1px solid #e5e7eb;
+          border-radius: 999px;
+          background: #f8fafc;
+          user-select: none;
+        }
         .tool-circle-btn {
           border: 1px solid #ececec;
           background: #ffffff;
@@ -3099,6 +3135,12 @@ export default function SearchInterface() {
         }
         .prefs-line-top { top: 2px; }
         .prefs-line-bottom { bottom: 2px; }
+        .reasoning-glyph {
+          font-size: 12px;
+          font-weight: 700;
+          color: #1f2937;
+          letter-spacing: 0.02em;
+        }
         .prefs-line-top::before,
         .prefs-line-bottom::after {
           content: '';
@@ -3273,6 +3315,7 @@ export default function SearchInterface() {
           .cite-item { padding: 10px; }
           .tool-circle-btn { width: 30px; height: 30px; }
           .composer-mode-label { font-size: 15px; }
+          .composer-reasoning-label { font-size: 13px; }
           .prefs-glyph { width: 14px; height: 10px; }
           .prefs-line-top::before,
           .prefs-line-bottom::after {

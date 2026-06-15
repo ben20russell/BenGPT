@@ -267,11 +267,24 @@ describe('SearchInterface', () => {
     expect(screen.getByText('Runs deep multi-step research')).toBeInTheDocument();
   });
 
-  it('renders reasoning intensity options in the requested order', async () => {
+  it('keeps reasoning options separate from the search mode menu', async () => {
     const user = userEvent.setup();
     render(<SearchInterface />);
 
     await user.click(screen.getByTestId('tools-preferences-btn'));
+    expect(screen.getAllByTestId(/^search-mode-option-/)).toHaveLength(3);
+    expect(screen.queryAllByTestId(/^reasoning-intensity-option-/)).toHaveLength(0);
+
+    await user.click(screen.getByTestId('tools-reasoning-btn'));
+    expect(screen.getAllByTestId(/^reasoning-intensity-option-/)).toHaveLength(5);
+    expect(screen.queryAllByTestId(/^search-mode-option-/)).toHaveLength(0);
+  });
+
+  it('renders reasoning intensity options in the requested order', async () => {
+    const user = userEvent.setup();
+    render(<SearchInterface />);
+
+    await user.click(screen.getByTestId('tools-reasoning-btn'));
 
     const options = screen.getAllByTestId(/^reasoning-intensity-option-/).map((element) => {
       const title = element.querySelector('.tool-dropdown-item-title');
@@ -293,6 +306,7 @@ describe('SearchInterface', () => {
     render(<SearchInterface />);
     expect(screen.getByTestId('tools-add-btn')).toBeInTheDocument();
     expect(screen.getByTestId('tools-preferences-btn')).toBeInTheDocument();
+    expect(screen.getByTestId('tools-reasoning-btn')).toBeInTheDocument();
     expect(screen.queryByTestId('tools-dropdown-btn')).not.toBeInTheDocument();
     expect(screen.queryByTestId('pro-mode-btn')).not.toBeInTheDocument();
     expect(screen.queryByTestId('voice-input-btn')).not.toBeInTheDocument();
@@ -337,7 +351,7 @@ describe('SearchInterface', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<SearchInterface />);
 
-    await user.click(screen.getByTestId('tools-preferences-btn'));
+    await user.click(screen.getByTestId('tools-reasoning-btn'));
     await user.click(screen.getByTestId('reasoning-intensity-option-low'));
     await user.type(screen.getByTestId('message-input'), 'Use lower reasoning');
     await user.click(screen.getByTestId('send-btn'));
