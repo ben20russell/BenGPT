@@ -365,7 +365,14 @@ function shouldRetryWithTextOnlyAttachmentFallback(input: {
     return false;
   }
   const status = getErrorStatusCode(input.error);
-  if (typeof status === "number" && status >= 500) {
+  if (status === 401 || status === 403) {
+    return false;
+  }
+  if (typeof status === "number" && status >= 400) {
+    return true;
+  }
+  const message = String((input.error as { message?: unknown })?.message || "").toLowerCase();
+  if (message.includes("internal server error") || message.includes("internal_error")) {
     return true;
   }
   return isInputFileCompatibilityError(input.error);

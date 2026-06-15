@@ -665,6 +665,110 @@ describe("POST /api/chat request shape", () => {
     expect(secondInputText.toLowerCase()).toContain("runtime-500.pdf");
   });
 
+  it("falls back to text-only file notes when file-attached request throws without a status field", async () => {
+    responsesCreateSpy.mockImplementation(async (request: {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    }) => {
+      const hasInputFile = Boolean(
+        request.input?.[0]?.content?.some((item) => item.type === "input_file"),
+      );
+      if (hasInputFile) {
+        throw new Error("Internal Server Error while handling uploaded file");
+      }
+      return {
+        output_text: "Recovered after unknown file-attachment failure",
+        output: [],
+      };
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Use attached file fallback path",
+        mode: "thinking",
+        useMemory: false,
+        files: [
+          {
+            name: "statusless-error.pdf",
+            type: "application/pdf",
+            size: 4567,
+            contentKind: "binary",
+            fileId: "assistant-statusless-error-id",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(2);
+    const secondCall = responsesCreateSpy.mock.calls[1]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const secondContent = secondCall.input?.[0]?.content || [];
+    const secondInputFile = secondContent.find((item) => item.type === "input_file");
+    const secondInputText = String(secondContent.find((item) => item.type === "input_text")?.text || "");
+    expect(secondInputFile).toBeUndefined();
+    expect(secondInputText.toLowerCase()).toContain("uploaded file references could not be attached");
+    expect(secondInputText.toLowerCase()).toContain("statusless-error.pdf");
+  });
+
+  it("falls back to text-only file notes when file-attached request throws a generic internal error", async () => {
+    responsesCreateSpy.mockImplementation(async (request: {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    }) => {
+      const hasInputFile = Boolean(
+        request.input?.[0]?.content?.some((item) => item.type === "input_file"),
+      );
+      if (hasInputFile) {
+        throw new Error("Internal Server Error");
+      }
+      return {
+        output_text: "Recovered after generic internal error",
+        output: [],
+      };
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Use attached file generic fallback",
+        mode: "thinking",
+        useMemory: false,
+        files: [
+          {
+            name: "generic-error.pdf",
+            type: "application/pdf",
+            size: 5678,
+            contentKind: "binary",
+            fileId: "assistant-generic-error-id",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(2);
+    const secondCall = responsesCreateSpy.mock.calls[1]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const secondContent = secondCall.input?.[0]?.content || [];
+    const secondInputFile = secondContent.find((item) => item.type === "input_file");
+    const secondInputText = String(secondContent.find((item) => item.type === "input_text")?.text || "");
+    expect(secondInputFile).toBeUndefined();
+    expect(secondInputText.toLowerCase()).toContain("uploaded file references could not be attached");
+    expect(secondInputText.toLowerCase()).toContain("generic-error.pdf");
+  });
+
   it("does not force web_search tool usage when files are attached", async () => {
     responsesCreateSpy.mockResolvedValue({
       output_text: "Used attached file content",
