@@ -28,6 +28,11 @@ const SEARCH_MODE_OPTIONS: Array<{ value: SearchMode; label: string; summary: st
   { value: 'deep_research', label: 'Deep Research', summary: 'Runs deep multi-step research' },
 ];
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
+const MAX_TEXT_FILE_CHARS = 60000;
+const MAX_BINARY_INLINE_FILE_BYTES = 400 * 1024;
+const MAX_CHAT_PAYLOAD_BYTES = 900 * 1024;
+const LARGE_BINARY_FILE_NOTE = `Binary content omitted because the file is too large for inline upload (${Math.round(MAX_BINARY_INLINE_FILE_BYTES / 1024)} KB max).`;
+const PAYLOAD_BUDGET_NOTE = 'Binary content omitted to keep the request size under the payload limit.';
 
 function detectMobileViewport(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -140,6 +145,25 @@ type HistoryTurnPayload = {
   user: string;
   assistant: string;
   mode: SearchMode;
+};
+
+type ChatPayloadFile = {
+  name: string;
+  type: string;
+  size: number;
+  contentKind: 'text' | 'binary';
+  contentText?: string;
+  contentBase64?: string;
+  note?: string;
+};
+
+type ChatRequestPayload = {
+  query: string;
+  mode: SearchMode;
+  useMemory: boolean;
+  files: ChatPayloadFile[];
+  gitSnippets: Array<{ label: string; code: string }>;
+  history: HistoryTurnPayload[];
 };
 
 type Turn = {
@@ -507,6 +531,82 @@ function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
   });
 }
 
+function estimateUtf8Bytes(value: string): number {
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(value).length;
+  }
+  return value.length;
+}
+
+function estimatePayloadBytes(payload: ChatRequestPayload): number {
+  return estimateUtf8Bytes(JSON.stringify(payload));
+}
+
+function appendNote(existing: string | undefined, addition: string): string {
+  if (!existing) return addition;
+  if (existing.includes(addition)) return existing;
+  return `${existing} ${addition}`.trim();
+}
+
+function mapUploadsToChatFiles(files: UploadedContextFile[]): ChatPayloadFile[] {
+  return files.map((file) => ({
+    name: file.name,
+    type: file.type,
+    size: file.size,
+    contentKind: file.contentKind,
+    contentText: file.contentText,
+    contentBase64: file.contentBase64,
+    note: file.note,
+  }));
+}
+
+function enforceChatPayloadBudget(input: ChatRequestPayload): {
+  payload: ChatRequestPayload;
+  trimmedBinaryCount: number;
+  estimatedBytes: number;
+} {
+  const files = input.files.map((file) => ({ ...file }));
+  const payload: ChatRequestPayload = {
+    ...input,
+    files,
+  };
+
+  let estimatedBytes = estimatePayloadBytes(payload);
+  let trimmedBinaryCount = 0;
+
+  if (estimatedBytes <= MAX_CHAT_PAYLOAD_BYTES) {
+    return { payload, trimmedBinaryCount, estimatedBytes };
+  }
+
+  for (let index = files.length - 1; index >= 0 && estimatedBytes > MAX_CHAT_PAYLOAD_BYTES; index -= 1) {
+    const file = files[index];
+    if (file.contentKind !== 'binary' || !file.contentBase64) continue;
+    file.note = appendNote(file.note, PAYLOAD_BUDGET_NOTE);
+    delete file.contentBase64;
+    trimmedBinaryCount += 1;
+    estimatedBytes = estimatePayloadBytes(payload);
+  }
+
+  return { payload, trimmedBinaryCount, estimatedBytes };
+}
+
+function buildPayloadForLogging(payload: ChatRequestPayload) {
+  return {
+    ...payload,
+    files: payload.files.map((file) => ({
+      ...file,
+      contentText:
+        typeof file.contentText === 'string'
+          ? `[text:${file.contentText.length} chars]`
+          : undefined,
+      contentBase64:
+        typeof file.contentBase64 === 'string'
+          ? `[base64:${file.contentBase64.length} chars]`
+          : undefined,
+    })),
+  };
+}
+
 async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
   const base: UploadedContextFile = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -519,13 +619,25 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
   try {
     if (isLikelyTextFile(file)) {
       const text = await readFileAsText(file);
-      const maxChars = 60000;
-      const trimmed = text.length > maxChars ? text.slice(0, maxChars) : text;
+      const trimmed = text.length > MAX_TEXT_FILE_CHARS ? text.slice(0, MAX_TEXT_FILE_CHARS) : text;
       return {
         ...base,
         contentKind: 'text',
         contentText: trimmed,
-        note: text.length > maxChars ? 'Text truncated to 60,000 characters.' : undefined,
+        note: text.length > MAX_TEXT_FILE_CHARS ? 'Text truncated to 60,000 characters.' : undefined,
+      };
+    }
+
+    if (file.size > MAX_BINARY_INLINE_FILE_BYTES) {
+      console.log('[UI] Binary file exceeds inline upload cap; attaching metadata only', {
+        name: file.name,
+        size: file.size,
+        maxInlineBytes: MAX_BINARY_INLINE_FILE_BYTES,
+      });
+      return {
+        ...base,
+        contentKind: 'binary',
+        note: LARGE_BINARY_FILE_NOTE,
       };
     }
 
@@ -541,13 +653,12 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
     console.log('[UI] Failed to parse uploaded file', { name: file.name, error });
     const fallbackText = await readFileAsText(file).catch(() => '');
     if (fallbackText) {
-      const maxChars = 60000;
-      const trimmed = fallbackText.length > maxChars ? fallbackText.slice(0, maxChars) : fallbackText;
+      const trimmed = fallbackText.length > MAX_TEXT_FILE_CHARS ? fallbackText.slice(0, MAX_TEXT_FILE_CHARS) : fallbackText;
       return {
         ...base,
         contentKind: 'text',
         contentText: trimmed,
-        note: fallbackText.length > maxChars ? 'Text truncated to 60,000 characters.' : 'Read as plain text fallback.',
+        note: fallbackText.length > MAX_TEXT_FILE_CHARS ? 'Text truncated to 60,000 characters.' : 'Read as plain text fallback.',
       };
     }
 
@@ -1230,12 +1341,25 @@ export default function SearchInterface() {
     if (normalized.length > 0) {
       setUploadedFiles((prev) => [...prev, ...normalized]);
     }
+    const metadataOnlyCount = normalized.filter(
+      (item) =>
+        item.contentKind === 'binary' &&
+        !item.contentBase64 &&
+        typeof item.note === 'string' &&
+        item.note.toLowerCase().includes('too large'),
+    ).length;
     if (failures > 0) {
       showToast(`Could not read ${failures} file${failures === 1 ? '' : 's'}. Try re-uploading.`);
+    }
+    if (metadataOnlyCount > 0) {
+      showToast(
+        `${metadataOnlyCount} file${metadataOnlyCount === 1 ? '' : 's'} exceeded inline upload limits. Metadata was attached instead.`,
+      );
     }
     console.log('[UI] File upload completed', {
       added: normalized.length,
       kinds: normalized.map((item) => item.contentKind),
+      metadataOnlyCount,
       failures,
     });
     event.target.value = '';
@@ -1528,27 +1652,42 @@ export default function SearchInterface() {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
-      const payload = {
+      const basePayload: ChatRequestPayload = {
         query: userText,
         mode: searchMode,
         useMemory,
-        files: filesSnapshot.map((file) => ({
-          name: file.name,
-          type: file.type,
-          size: file.size,
-          contentKind: file.contentKind,
-          contentText: file.contentText,
-          contentBase64: file.contentBase64,
-          note: file.note,
-        })),
+        files: mapUploadsToChatFiles(filesSnapshot),
         gitSnippets: gitSnippetsSnapshot.map((snippet) => ({
           label: snippet.label,
           code: snippet.code,
         })),
         history: historyTurns,
       };
+      const { payload, trimmedBinaryCount, estimatedBytes } = enforceChatPayloadBudget(basePayload);
 
-      console.log('[UI] POST /api/chat request', payload);
+      if (trimmedBinaryCount > 0) {
+        console.log('[UI] Trimmed binary attachments to fit payload budget', {
+          trimmedBinaryCount,
+          estimatedBytes,
+          maxBytes: MAX_CHAT_PAYLOAD_BYTES,
+        });
+        showToast(
+          `Removed binary bytes from ${trimmedBinaryCount} attachment${trimmedBinaryCount === 1 ? '' : 's'} to fit request size limits.`,
+        );
+      }
+
+      if (estimatedBytes > MAX_CHAT_PAYLOAD_BYTES) {
+        console.log('[UI] Chat payload exceeds max request budget after trimming', {
+          estimatedBytes,
+          maxBytes: MAX_CHAT_PAYLOAD_BYTES,
+          fileCount: payload.files.length,
+          historyTurnCount: payload.history.length,
+          gitSnippetCount: payload.gitSnippets.length,
+        });
+        throw new Error('This request is too large. Remove large attachments or shorten your context, then try again.');
+      }
+
+      console.log('[UI] POST /api/chat request', buildPayloadForLogging(payload));
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
@@ -1564,6 +1703,9 @@ export default function SearchInterface() {
 
       if (!response.ok) {
         console.log('[UI] /api/chat returned an error response', { status: response.status, json });
+        if (response.status === 413) {
+          throw new Error('This request is too large. Remove large attachments or shorten your context, then try again.');
+        }
         const details = [json?.error, json?.recovery].filter(Boolean).join(' ');
         throw new Error(details || 'Request failed. Please try again.');
       }

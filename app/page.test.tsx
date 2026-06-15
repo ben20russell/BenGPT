@@ -390,6 +390,54 @@ describe('SearchInterface', () => {
     expect(String(payload.files[0].contentBase64).length).toBeGreaterThan(0);
   });
 
+  it('omits oversized binary bytes from /api/chat payload to prevent oversized requests', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ answer: 'Handled large file', citations: [] }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const hugePdfBytes = new Uint8Array(1024 * 1024);
+    const hugePdfFile = new File([hugePdfBytes], 'huge.pdf', { type: 'application/pdf' });
+    await user.upload(screen.getByTestId('file-input'), hugePdfFile);
+    await user.type(screen.getByTestId('message-input'), 'Use this large attachment');
+    await user.click(screen.getByTestId('send-btn'));
+
+    await waitFor(() => {
+      const chatCall = fetchMock.mock.calls.find((call) => call[0] === '/api/chat');
+      expect(chatCall).toBeDefined();
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => call[0] === '/api/chat') as [string, RequestInit];
+    const payload = JSON.parse(String(init.body));
+    expect(payload.files).toHaveLength(1);
+    expect(payload.files[0].name).toBe('huge.pdf');
+    expect(payload.files[0].contentKind).toBe('binary');
+    expect(payload.files[0].contentBase64).toBeUndefined();
+    expect(String(payload.files[0].note || '')).toContain('too large');
+  });
+
+  it('shows a recovery message when /api/chat returns request-too-large', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 413,
+      json: async () => null,
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    await user.type(screen.getByTestId('message-input'), 'Trigger request-too-large');
+    await user.click(screen.getByTestId('send-btn'));
+
+    expect(await screen.findByText(/request is too large/i)).toBeInTheDocument();
+    expect(screen.getByText(/remove large attachments/i)).toBeInTheDocument();
+  });
+
   it('renders trending suggestions from the hourly prompts endpoint', async () => {
     const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
       const url =

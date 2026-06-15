@@ -50,20 +50,16 @@ function getSupabaseClient(): SupabaseClient | null {
   const supabaseKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
-  const allowLocalFallback =
-    process.env.NODE_ENV === "test" || process.env.RECENT_SEARCHES_ALLOW_FILE_FALLBACK === "true";
 
   if (!supabaseUrl || !supabaseKey) {
-    if (allowLocalFallback) {
-      if (supabaseClient !== null) {
-        console.log("[/api/recent-searches] Supabase env vars are missing; using local file storage fallback");
-      }
-      supabaseClient = null;
-      return supabaseClient;
+    if (supabaseClient !== null) {
+      console.log("[/api/recent-searches] Supabase env vars are missing; using local file storage fallback", {
+        hasSupabaseUrl: Boolean(supabaseUrl),
+        hasSupabaseKey: Boolean(supabaseKey),
+      });
     }
-    throw new Error(
-      "Missing Supabase environment variables. Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
-    );
+    supabaseClient = null;
+    return supabaseClient;
   }
 
   if (typeof supabaseClient !== "undefined" && supabaseClient !== null) return supabaseClient;
@@ -231,26 +227,33 @@ export async function GET(req: NextRequest) {
     const supabase = getSupabaseClient();
     console.log("[/api/recent-searches] GET request", { key });
     if (supabase) {
-      const existing = await readFromSupabase(key);
-      if (!existing) {
-        console.log("[/api/recent-searches] No Supabase recents found for key", { key });
+      try {
+        const existing = await readFromSupabase(key);
+        if (!existing) {
+          console.log("[/api/recent-searches] No Supabase recents found for key", { key });
+          return NextResponse.json({
+            conversations: [],
+            activeConversationId: null,
+          });
+        }
+
+        console.log("[/api/recent-searches] Returning Supabase recents", {
+          key,
+          conversations: existing.conversations.length,
+          activeConversationId: existing.activeConversationId,
+          updatedAt: existing.updatedAt,
+        });
+
         return NextResponse.json({
-          conversations: [],
-          activeConversationId: null,
+          conversations: existing.conversations,
+          activeConversationId: existing.activeConversationId,
+        });
+      } catch (error) {
+        console.log("[/api/recent-searches] Supabase GET failed; falling back to local store", {
+          key,
+          error,
         });
       }
-
-      console.log("[/api/recent-searches] Returning Supabase recents", {
-        key,
-        conversations: existing.conversations.length,
-        activeConversationId: existing.activeConversationId,
-        updatedAt: existing.updatedAt,
-      });
-
-      return NextResponse.json({
-        conversations: existing.conversations,
-        activeConversationId: existing.activeConversationId,
-      });
     }
 
     const store = await readStore();
@@ -304,17 +307,24 @@ export async function POST(req: NextRequest) {
       activeConversationId,
     });
 
-    const wroteToSupabase = await writeToSupabase({
-      clientKey: key,
-      deviceId,
-      ipAddress,
-      conversations,
-      activeConversationId,
-    });
+    let wroteToSupabase = false;
+    try {
+      wroteToSupabase = await writeToSupabase({
+        clientKey: key,
+        deviceId,
+        ipAddress,
+        conversations,
+        activeConversationId,
+      });
+    } catch (error) {
+      console.log("[/api/recent-searches] Supabase POST failed; falling back to local store", {
+        key,
+        error,
+      });
+      wroteToSupabase = false;
+    }
+
     if (!wroteToSupabase) {
-      if (process.env.NODE_ENV !== "test" && process.env.RECENT_SEARCHES_ALLOW_FILE_FALLBACK !== "true") {
-        throw new Error("Supabase write was skipped and local fallback is disabled in this environment.");
-      }
       const store = await readStore();
       store[key] = {
         conversations,

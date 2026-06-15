@@ -10,6 +10,7 @@ import { GET, POST } from "./route";
 describe("POST/GET /api/recent-searches", () => {
   let tempDir = "";
   let storePath = "";
+  const originalNodeEnv = process.env.NODE_ENV;
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "recent-searches-"));
@@ -19,6 +20,7 @@ describe("POST/GET /api/recent-searches", () => {
 
   afterEach(async () => {
     delete process.env.RECENT_SEARCHES_STORE_PATH;
+    process.env.NODE_ENV = originalNodeEnv;
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -107,5 +109,42 @@ describe("POST/GET /api/recent-searches", () => {
     expect(loadRes.status).toBe(200);
     expect(loadJson.conversations).toHaveLength(130);
     expect(loadJson.activeConversationId).toBe("c-129");
+  });
+
+  it("falls back to local storage when Supabase env vars are missing in production", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+    const saveReq = new Request("http://localhost/api/recent-searches", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-forwarded-for": "198.51.100.77",
+        "x-device-id": "prod-fallback-device",
+      },
+      body: JSON.stringify({
+        activeConversationId: "prod-1",
+        conversations: [{ id: "prod-1", title: "Prod fallback", turns: [] }],
+      }),
+    });
+
+    const saveRes = await POST(saveReq as never);
+    expect(saveRes.status).toBe(200);
+
+    const loadReq = new Request("http://localhost/api/recent-searches", {
+      method: "GET",
+      headers: {
+        "x-forwarded-for": "198.51.100.77",
+        "x-device-id": "prod-fallback-device",
+      },
+    });
+    const loadRes = await GET(loadReq as never);
+    const loadJson = await loadRes.json();
+
+    expect(loadRes.status).toBe(200);
+    expect(loadJson.activeConversationId).toBe("prod-1");
+    expect(loadJson.conversations).toHaveLength(1);
   });
 });
