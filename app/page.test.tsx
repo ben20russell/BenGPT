@@ -362,9 +362,25 @@ describe('SearchInterface', () => {
 
   it('sends binary document uploads as binary content instead of metadata-only', async () => {
     const user = userEvent.setup();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ answer: 'Parsed PDF', citations: [] }),
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload')) {
+        return {
+          ok: true,
+          json: async () => ({ fileId: 'file_pdf_sample_1' }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Parsed PDF', citations: [] }),
+      };
     });
 
     vi.stubGlobal('fetch', fetchMock);
@@ -386,15 +402,31 @@ describe('SearchInterface', () => {
     expect(payload.files).toHaveLength(1);
     expect(payload.files[0].name).toBe('sample.pdf');
     expect(payload.files[0].contentKind).toBe('binary');
-    expect(typeof payload.files[0].contentBase64).toBe('string');
-    expect(String(payload.files[0].contentBase64).length).toBeGreaterThan(0);
+    expect(payload.files[0].fileId).toBe('file_pdf_sample_1');
+    expect(payload.files[0].contentBase64).toBeUndefined();
   });
 
-  it('omits oversized binary bytes from /api/chat payload to prevent oversized requests', async () => {
+  it('uses uploaded file ids for large PDFs to prevent oversized chat payloads', async () => {
     const user = userEvent.setup();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ answer: 'Handled large file', citations: [] }),
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload')) {
+        return {
+          ok: true,
+          json: async () => ({ fileId: 'file_pdf_large_1' }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'Handled large file', citations: [] }),
+      };
     });
 
     vi.stubGlobal('fetch', fetchMock);
@@ -416,8 +448,9 @@ describe('SearchInterface', () => {
     expect(payload.files).toHaveLength(1);
     expect(payload.files[0].name).toBe('huge.pdf');
     expect(payload.files[0].contentKind).toBe('binary');
+    expect(payload.files[0].fileId).toBe('file_pdf_large_1');
     expect(payload.files[0].contentBase64).toBeUndefined();
-    expect(String(payload.files[0].note || '')).toContain('too large');
+    expect(String(payload.files[0].note || '')).toContain('Uploaded');
   });
 
   it('shows a recovery message when /api/chat returns request-too-large', async () => {

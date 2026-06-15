@@ -241,4 +241,92 @@ describe("POST /api/chat request shape", () => {
 
     expect(firstCall.instructions).not.toContain("--- MEMORY: CONTEXT FROM PAST SEARCHES ---");
   });
+
+  it("uses input_file.file_id for binary files that were uploaded ahead of time", async () => {
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "ok",
+      output: [],
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Analyze this uploaded PDF",
+        files: [
+          {
+            name: "sample.pdf",
+            type: "application/pdf",
+            size: 12345,
+            contentKind: "binary",
+            fileId: "file_pdf_123",
+            note: "Uploaded and attached as file_id.",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+
+    const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const firstMessage = firstCall.input?.[0];
+    const inputFile = firstMessage?.content?.find((item) => item.type === "input_file");
+
+    expect(inputFile).toBeDefined();
+    expect(inputFile).toMatchObject({
+      type: "input_file",
+      file_id: "file_pdf_123",
+      filename: "sample.pdf",
+    });
+    expect(inputFile).not.toHaveProperty("file_data");
+  });
+
+  it("normalizes raw base64 PDF bytes into a data URL when file_data is used", async () => {
+    responsesCreateSpy.mockResolvedValue({
+      output_text: "ok",
+      output: [],
+    });
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Analyze inline PDF bytes",
+        files: [
+          {
+            name: "inline.pdf",
+            type: "application/pdf",
+            size: 4567,
+            contentKind: "binary",
+            contentBase64: "JVBERi0xLjQKJ...",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(1);
+
+    const firstCall = responsesCreateSpy.mock.calls[0]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const firstMessage = firstCall.input?.[0];
+    const inputFile = firstMessage?.content?.find((item) => item.type === "input_file");
+
+    expect(inputFile).toBeDefined();
+    expect(inputFile).toMatchObject({
+      type: "input_file",
+      filename: "inline.pdf",
+    });
+    expect(String(inputFile?.file_data || "")).toMatch(/^data:application\/pdf;base64,/);
+  });
 });

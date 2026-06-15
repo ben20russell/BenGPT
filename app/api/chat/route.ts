@@ -18,6 +18,7 @@ type UploadContextFile = {
   contentKind?: "text" | "binary";
   contentText?: string;
   contentBase64?: string;
+  fileId?: string;
   note?: string;
 };
 
@@ -66,7 +67,9 @@ type ResponseInputText = {
 
 type ResponseInputFile = {
   type: "input_file";
-  file_data: string;
+  file_data?: string;
+  file_id?: string | null;
+  file_url?: string;
   filename?: string;
   detail?: "low" | "high";
 };
@@ -194,6 +197,14 @@ const MEMORY_RETRIEVER_SCRIPT_CANDIDATES = [
   path.resolve(process.cwd(), "..", "my-gpt-search", "scripts", "retrieve_memory.py"),
   path.resolve(process.cwd(), "..", "scripts", "retrieve_memory.py"),
 ];
+
+function normalizeBase64FileData(input: string, mimeType?: string): string {
+  if (input.startsWith("data:")) {
+    return input;
+  }
+  const safeMimeType = (mimeType || "application/octet-stream").trim() || "application/octet-stream";
+  return `data:${safeMimeType};base64,${input}`;
+}
 
 function resolveUseMemory(raw: unknown): boolean {
   return typeof raw === "boolean" ? raw : DEFAULT_USE_MEMORY;
@@ -456,10 +467,19 @@ export async function POST(req: NextRequest) {
         if (file.contentKind === "text" && file.contentText) {
           return `${header}\nText content:\n${file.contentText}`;
         }
+        if (file.contentKind === "binary" && typeof file.fileId === "string" && file.fileId.trim().length > 0) {
+          inputFiles.push({
+            type: "input_file",
+            file_id: file.fileId.trim(),
+            filename: file.name || `document-${index + 1}`,
+            detail: "high",
+          });
+          return `${header}\nFile attached by file_id for model parsing.`;
+        }
         if (file.contentKind === "binary" && file.contentBase64) {
           inputFiles.push({
             type: "input_file",
-            file_data: file.contentBase64,
+            file_data: normalizeBase64FileData(file.contentBase64, file.type),
             filename: file.name || `document-${index + 1}`,
             detail: "high",
           });

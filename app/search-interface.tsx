@@ -33,6 +33,7 @@ const MAX_BINARY_INLINE_FILE_BYTES = 400 * 1024;
 const MAX_CHAT_PAYLOAD_BYTES = 900 * 1024;
 const LARGE_BINARY_FILE_NOTE = `Binary content omitted because the file is too large for inline upload (${Math.round(MAX_BINARY_INLINE_FILE_BYTES / 1024)} KB max).`;
 const PAYLOAD_BUDGET_NOTE = 'Binary content omitted to keep the request size under the payload limit.';
+const FILE_UPLOAD_SUCCESS_NOTE = 'Uploaded to files API and attached by file_id.';
 
 function detectMobileViewport(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -132,6 +133,7 @@ type UploadedContextFile = {
   contentKind: 'text' | 'binary';
   contentText?: string;
   contentBase64?: string;
+  fileId?: string;
   note?: string;
 };
 
@@ -154,6 +156,7 @@ type ChatPayloadFile = {
   contentKind: 'text' | 'binary';
   contentText?: string;
   contentBase64?: string;
+  fileId?: string;
   note?: string;
 };
 
@@ -531,6 +534,46 @@ function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
   });
 }
 
+function getFileUploadEndpoint() {
+  return process.env.NODE_ENV === 'test' ? 'http://localhost/api/files/upload' : '/api/files/upload';
+}
+
+async function uploadBinaryContextFile(file: File): Promise<string> {
+  const formData = new FormData();
+  formData.append('file', file, file.name || 'upload.bin');
+  const endpoint = getFileUploadEndpoint();
+  console.log('[UI] Uploading binary context file to files endpoint', {
+    endpoint,
+    name: file.name,
+    size: file.size,
+    type: file.type,
+  });
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    body: formData,
+  });
+
+  const json = (await response.json().catch(() => null)) as
+    | { fileId?: string; error?: string; recovery?: string }
+    | null;
+
+  if (!response.ok) {
+    const details = [json?.error, json?.recovery].filter(Boolean).join(' ');
+    throw new Error(details || `Binary upload failed with status ${response.status}`);
+  }
+  if (!json?.fileId || typeof json.fileId !== 'string') {
+    throw new Error('Files upload endpoint returned no fileId');
+  }
+
+  console.log('[UI] Binary context file uploaded', {
+    name: file.name,
+    size: file.size,
+    fileId: json.fileId,
+  });
+  return json.fileId;
+}
+
 function estimateUtf8Bytes(value: string): number {
   if (typeof TextEncoder !== 'undefined') {
     return new TextEncoder().encode(value).length;
@@ -556,6 +599,7 @@ function mapUploadsToChatFiles(files: UploadedContextFile[]): ChatPayloadFile[] 
     contentKind: file.contentKind,
     contentText: file.contentText,
     contentBase64: file.contentBase64,
+    fileId: file.fileId,
     note: file.note,
   }));
 }
@@ -603,6 +647,7 @@ function buildPayloadForLogging(payload: ChatRequestPayload) {
         typeof file.contentBase64 === 'string'
           ? `[base64:${file.contentBase64.length} chars]`
           : undefined,
+      fileId: file.fileId || undefined,
     })),
   };
 }
@@ -628,6 +673,22 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
       };
     }
 
+    try {
+      const fileId = await uploadBinaryContextFile(file);
+      return {
+        ...base,
+        contentKind: 'binary',
+        fileId,
+        note: FILE_UPLOAD_SUCCESS_NOTE,
+      };
+    } catch (uploadError) {
+      console.log('[UI] Binary file upload to files API failed; trying inline fallback when possible', {
+        name: file.name,
+        size: file.size,
+        error: uploadError,
+      });
+    }
+
     if (file.size > MAX_BINARY_INLINE_FILE_BYTES) {
       console.log('[UI] Binary file exceeds inline upload cap; attaching metadata only', {
         name: file.name,
@@ -637,7 +698,7 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
       return {
         ...base,
         contentKind: 'binary',
-        note: LARGE_BINARY_FILE_NOTE,
+        note: `${LARGE_BINARY_FILE_NOTE} Upload to files API failed; try a smaller file or retry upload.`,
       };
     }
 
@@ -647,7 +708,7 @@ async function normalizeUploadFile(file: File): Promise<UploadedContextFile> {
       ...base,
       contentKind: 'binary',
       contentBase64: base64,
-      note: 'Binary file included as base64 for model context.',
+      note: 'Files API upload failed; using inline base64 fallback for model context.',
     };
   } catch (error) {
     console.log('[UI] Failed to parse uploaded file', { name: file.name, error });
@@ -1344,12 +1405,19 @@ export default function SearchInterface() {
     const metadataOnlyCount = normalized.filter(
       (item) =>
         item.contentKind === 'binary' &&
+        !item.fileId &&
         !item.contentBase64 &&
         typeof item.note === 'string' &&
         item.note.toLowerCase().includes('too large'),
     ).length;
+    const uploadedByIdCount = normalized.filter((item) => item.contentKind === 'binary' && Boolean(item.fileId)).length;
     if (failures > 0) {
       showToast(`Could not read ${failures} file${failures === 1 ? '' : 's'}. Try re-uploading.`);
+    }
+    if (uploadedByIdCount > 0) {
+      showToast(
+        `${uploadedByIdCount} file${uploadedByIdCount === 1 ? '' : 's'} uploaded successfully for full document parsing.`,
+      );
     }
     if (metadataOnlyCount > 0) {
       showToast(
@@ -1359,6 +1427,7 @@ export default function SearchInterface() {
     console.log('[UI] File upload completed', {
       added: normalized.length,
       kinds: normalized.map((item) => item.contentKind),
+      uploadedByIdCount,
       metadataOnlyCount,
       failures,
     });
@@ -1651,6 +1720,20 @@ export default function SearchInterface() {
     try {
       const controller = new AbortController();
       abortControllerRef.current = controller;
+
+      const missingBinaryUpload = filesSnapshot.filter(
+        (file) => file.contentKind === 'binary' && !file.fileId && !file.contentBase64,
+      );
+      if (missingBinaryUpload.length > 0) {
+        const fileNames = missingBinaryUpload.map((file) => file.name).slice(0, 3);
+        console.log('[UI] Blocking send because some binary files were not uploaded or inlined', {
+          count: missingBinaryUpload.length,
+          fileNames,
+        });
+        throw new Error(
+          `Some attachments were not uploaded successfully (${fileNames.join(', ')}). Re-upload those files, then try again.`,
+        );
+      }
 
       const basePayload: ChatRequestPayload = {
         query: userText,
