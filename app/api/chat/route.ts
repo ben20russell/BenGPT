@@ -143,6 +143,12 @@ type FilesReadinessApi = {
   };
 };
 
+type FilesContentApi = {
+  files: {
+    content: (id: string) => Promise<Response>;
+  };
+};
+
 type ChatResponsesRequest = Parameters<ResponsesApi["responses"]["create"]>[0];
 
 type SearchPreset = {
@@ -259,6 +265,10 @@ const MEMORY_RETRIEVER_SCRIPT_CANDIDATES = [
 ];
 const FILE_PROCESSING_POLL_INTERVAL_MS = 250;
 const FILE_PROCESSING_MAX_WAIT_MS = 20_000;
+const MAX_ATTACHMENT_FALLBACK_FILES = 4;
+const MAX_ATTACHMENT_FALLBACK_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_FALLBACK_CHARS_PER_FILE = 6_000;
+const MAX_ATTACHMENT_FALLBACK_TOTAL_CHARS = 18_000;
 const ATTACHMENT_GROUNDING_INSTRUCTIONS = [
   "Attachment handling requirements:",
   "- One or more input_file attachments are included and must be treated as primary source material.",
@@ -378,22 +388,342 @@ function shouldRetryWithTextOnlyAttachmentFallback(input: {
   return isInputFileCompatibilityError(input.error);
 }
 
-function buildTextOnlyAttachmentFallbackInputMessage(input: {
+function resolveAttachmentName(file: UploadContextFile, index: number): string {
+  const fallbackName = `document-${index + 1}`;
+  const name = String(file.name || "").trim();
+  return name || fallbackName;
+}
+
+function inferMimeTypeForExtraction(file: UploadContextFile): string {
+  const explicit = String(file.type || "").trim().toLowerCase();
+  if (explicit) {
+    return explicit;
+  }
+  const extension = path.extname(resolveAttachmentName(file, 0)).trim().toLowerCase();
+  if (extension === ".pdf") return "application/pdf";
+  if (extension === ".txt") return "text/plain";
+  if (extension === ".md") return "text/markdown";
+  if (extension === ".json") return "application/json";
+  if (extension === ".csv") return "text/csv";
+  if (extension === ".xml") return "application/xml";
+  if (extension === ".html") return "text/html";
+  return "application/octet-stream";
+}
+
+function isLikelyTextMimeType(mimeType: string): boolean {
+  if (!mimeType) return false;
+  if (mimeType.startsWith("text/")) return true;
+  return (
+    mimeType.includes("json") ||
+    mimeType.includes("xml") ||
+    mimeType.includes("csv") ||
+    mimeType.includes("markdown") ||
+    mimeType.includes("yaml") ||
+    mimeType.includes("x-yaml") ||
+    mimeType.includes("javascript") ||
+    mimeType.includes("typescript")
+  );
+}
+
+function isLikelyTextExtension(fileName: string): boolean {
+  const extension = path.extname(fileName).trim().toLowerCase();
+  return (
+    extension === ".txt" ||
+    extension === ".md" ||
+    extension === ".csv" ||
+    extension === ".json" ||
+    extension === ".xml" ||
+    extension === ".html" ||
+    extension === ".yaml" ||
+    extension === ".yml" ||
+    extension === ".log"
+  );
+}
+
+function decodeUploadedBase64(contentBase64: string): Uint8Array | null {
+  const trimmed = contentBase64.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.includes(",") ? trimmed.split(",").slice(1).join(",") : trimmed;
+  try {
+    return new Uint8Array(Buffer.from(normalized, "base64"));
+  } catch {
+    return null;
+  }
+}
+
+function bytesLookLikePdf(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46
+  );
+}
+
+function decodeUtf8(bytes: Uint8Array): string {
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  return decoder.decode(bytes).replaceAll("\0", "").trim();
+}
+
+function clipAttachmentText(input: {
+  text: string;
+  maxChars: number;
+}): { text: string; truncated: boolean } {
+  if (input.maxChars <= 0) {
+    return {
+      text: "",
+      truncated: input.text.length > 0,
+    };
+  }
+  if (input.text.length <= input.maxChars) {
+    return {
+      text: input.text,
+      truncated: false,
+    };
+  }
+  return {
+    text: `${input.text.slice(0, input.maxChars)}\n[...truncated...]`,
+    truncated: true,
+  };
+}
+
+async function extractPdfText(bytes: Uint8Array): Promise<string> {
+  const pdfjs = (await import("pdfjs-dist/legacy/build/pdf.mjs")) as unknown as {
+    getDocument: (options: {
+      data: Uint8Array;
+      useWorkerFetch?: boolean;
+      isEvalSupported?: boolean;
+      disableFontFace?: boolean;
+    }) => {
+      promise: Promise<{
+        numPages: number;
+        getPage: (pageNumber: number) => Promise<{
+          getTextContent: () => Promise<{ items: Array<{ str?: string }> }>;
+        }>;
+        destroy: () => Promise<void>;
+      }>;
+      destroy: () => Promise<void>;
+    };
+  };
+
+  const loadingTask = pdfjs.getDocument({
+    data: bytes,
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    disableFontFace: true,
+  });
+  const document = await loadingTask.promise;
+  const pageTexts: string[] = [];
+  const maxPages = Math.min(document.numPages, 25);
+
+  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items
+      .map((item) => String(item?.str || "").trim())
+      .filter((item) => item.length > 0)
+      .join(" ");
+    if (pageText) {
+      pageTexts.push(pageText);
+    }
+  }
+
+  await document.destroy();
+  await loadingTask.destroy();
+  return pageTexts.join("\n\n").trim();
+}
+
+async function extractTextFromBytes(input: {
+  bytes: Uint8Array;
+  mimeType: string;
+  name: string;
+}): Promise<string> {
+  const mimeType = input.mimeType.toLowerCase();
+  const looksLikePdf = mimeType.includes("pdf") || path.extname(input.name).toLowerCase() === ".pdf" || bytesLookLikePdf(input.bytes);
+
+  if (looksLikePdf) {
+    return extractPdfText(input.bytes);
+  }
+
+  if (isLikelyTextMimeType(mimeType) || isLikelyTextExtension(input.name)) {
+    return decodeUtf8(input.bytes);
+  }
+
+  return "";
+}
+
+async function downloadUploadedFileBytes(input: {
+  filesApi: FilesContentApi;
+  fileId: string;
+}): Promise<Uint8Array | null> {
+  try {
+    const response = await input.filesApi.files.content(input.fileId);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length === 0) {
+      console.log("[/api/chat] Downloaded uploaded file has zero bytes; skipping extraction", {
+        fileId: input.fileId,
+      });
+      return null;
+    }
+    return bytes;
+  } catch (error) {
+    console.log("[/api/chat] Failed to download uploaded file bytes for fallback extraction", {
+      fileId: input.fileId,
+      error,
+    });
+    return null;
+  }
+}
+
+type AttachmentFallbackExtraction = {
+  name: string;
+  text: string;
+  source: "content_text" | "content_base64" | "file_id_download";
+  truncated: boolean;
+};
+
+async function collectAttachmentFallbackExtractions(input: {
+  filesApi: FilesContentApi;
+  files: UploadContextFile[];
+}): Promise<AttachmentFallbackExtraction[]> {
+  const candidates = input.files.slice(0, MAX_ATTACHMENT_FALLBACK_FILES);
+  const extractions: AttachmentFallbackExtraction[] = [];
+  let remainingBudget = MAX_ATTACHMENT_FALLBACK_TOTAL_CHARS;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    if (remainingBudget <= 0) {
+      break;
+    }
+
+    const file = candidates[index];
+    const name = resolveAttachmentName(file, index);
+    try {
+      let rawText = "";
+      let source: AttachmentFallbackExtraction["source"] | null = null;
+
+      if (typeof file.contentText === "string" && file.contentText.trim().length > 0) {
+        rawText = file.contentText.trim();
+        source = "content_text";
+      } else if (typeof file.contentBase64 === "string" && file.contentBase64.trim().length > 0) {
+        const bytes = decodeUploadedBase64(file.contentBase64);
+        if (bytes && bytes.length > 0 && bytes.length <= MAX_ATTACHMENT_FALLBACK_BYTES) {
+          rawText = await extractTextFromBytes({
+            bytes,
+            mimeType: inferMimeTypeForExtraction(file),
+            name,
+          });
+          source = "content_base64";
+        } else if (bytes && bytes.length > MAX_ATTACHMENT_FALLBACK_BYTES) {
+          console.log("[/api/chat] Skipping attachment extraction because inline bytes exceed limit", {
+            name,
+            bytes: bytes.length,
+            maxBytes: MAX_ATTACHMENT_FALLBACK_BYTES,
+          });
+        }
+      } else if (typeof file.fileId === "string" && file.fileId.trim().length > 0) {
+        const downloaded = await downloadUploadedFileBytes({
+          filesApi: input.filesApi,
+          fileId: file.fileId.trim(),
+        });
+        if (downloaded && downloaded.length <= MAX_ATTACHMENT_FALLBACK_BYTES) {
+          rawText = await extractTextFromBytes({
+            bytes: downloaded,
+            mimeType: inferMimeTypeForExtraction(file),
+            name,
+          });
+          source = "file_id_download";
+        } else if (downloaded && downloaded.length > MAX_ATTACHMENT_FALLBACK_BYTES) {
+          console.log("[/api/chat] Skipping attachment extraction because downloaded bytes exceed limit", {
+            name,
+            fileId: file.fileId,
+            bytes: downloaded.length,
+            maxBytes: MAX_ATTACHMENT_FALLBACK_BYTES,
+          });
+        }
+      }
+
+      const normalizedText = rawText.replace(/\r/g, "").trim();
+      if (!normalizedText || !source) {
+        continue;
+      }
+
+      const perFileCapped = clipAttachmentText({
+        text: normalizedText,
+        maxChars: Math.min(MAX_ATTACHMENT_FALLBACK_CHARS_PER_FILE, remainingBudget),
+      });
+      if (!perFileCapped.text) {
+        continue;
+      }
+      remainingBudget -= perFileCapped.text.length;
+      extractions.push({
+        name,
+        text: perFileCapped.text,
+        source,
+        truncated: perFileCapped.truncated,
+      });
+
+      console.log("[/api/chat] Extracted uploaded attachment text for fallback", {
+        name,
+        source,
+        chars: perFileCapped.text.length,
+        truncated: perFileCapped.truncated,
+        remainingBudget,
+      });
+    } catch (error) {
+      console.log("[/api/chat] Failed to extract uploaded attachment text for fallback", {
+        name,
+        error,
+      });
+    }
+  }
+
+  if (extractions.length === 0) {
+    console.log("[/api/chat] Attachment fallback extraction produced no usable text");
+  } else {
+    console.log("[/api/chat] Attachment fallback extraction summary", {
+      extractedCount: extractions.length,
+      filesConsidered: candidates.length,
+    });
+  }
+
+  return extractions;
+}
+
+async function buildTextOnlyAttachmentFallbackInputMessage(input: {
   composedInput: string;
   files: UploadContextFile[];
-}): { inputMessage: ResponseInputMessage; attachmentNames: string[] } {
-  const attachmentNames = input.files.map((file, index) => {
-    const fallbackName = `document-${index + 1}`;
-    const name = String(file.name || "").trim();
-    return name || fallbackName;
+  filesApi: FilesContentApi;
+}): Promise<{ inputMessage: ResponseInputMessage; attachmentNames: string[]; extractedCount: number }> {
+  const attachmentNames = input.files.map((file, index) => resolveAttachmentName(file, index));
+  const extracted = await collectAttachmentFallbackExtractions({
+    filesApi: input.filesApi,
+    files: input.files,
   });
-  const textOnlyAttachmentFallbackNotice = [
+
+  const fallbackLines = [
     "Attachment fallback notice:",
     "- Uploaded file references could not be attached for parsing in this deployment.",
-    "- Do not assume direct access to the uploaded files for this response.",
+    extracted.length > 0
+      ? "- Fallback extraction succeeded for one or more uploaded files; use extracted text below."
+      : "- No fallback extraction text was available from uploaded files.",
     "Unavailable uploaded files:",
     ...attachmentNames.map((name) => `- ${name}`),
-  ].join("\n");
+  ];
+
+  if (extracted.length > 0) {
+    fallbackLines.push("", "Extracted fallback text from uploaded files:");
+    extracted.forEach((entry, index) => {
+      fallbackLines.push(
+        `File ${index + 1}: ${entry.name}${entry.truncated ? " (excerpt)" : ""}`,
+        `Source: ${entry.source}`,
+        entry.text,
+      );
+    });
+  }
+
+  const textOnlyAttachmentFallbackNotice = fallbackLines.join("\n");
+
   return {
     inputMessage: {
       type: "message",
@@ -406,6 +736,7 @@ function buildTextOnlyAttachmentFallbackInputMessage(input: {
       ],
     },
     attachmentNames,
+    extractedCount: extracted.length,
   };
 }
 
@@ -849,8 +1180,6 @@ export async function POST(req: NextRequest) {
           inputFiles.push({
             type: "input_file",
             file_id: fileId,
-            filename: safeName,
-            detail: "high",
           });
           attachedByIdCount += 1;
           return;
@@ -972,15 +1301,17 @@ export async function POST(req: NextRequest) {
 
       if (!shouldRetryMinimal) {
         if (shouldRetryTextOnlyFromPrimary) {
-          const textOnlyFallback = buildTextOnlyAttachmentFallbackInputMessage({
+          const textOnlyFallback = await buildTextOnlyAttachmentFallbackInputMessage({
             composedInput,
             files,
+            filesApi: client as unknown as FilesContentApi,
           });
           console.log("[/api/chat] Retrying without input_file attachments after primary request failure", {
             searchMode,
             status: getErrorStatusCode(error),
             message: maybe?.message,
             unavailableAttachmentCount: textOnlyFallback.attachmentNames.length,
+            extractedAttachmentCount: textOnlyFallback.extractedCount,
           });
           const textOnlyRequest: ChatResponsesRequest = {
             model: config.deployment,
@@ -1027,9 +1358,10 @@ export async function POST(req: NextRequest) {
             throw fallbackError;
           }
 
-          const textOnlyFallback = buildTextOnlyAttachmentFallbackInputMessage({
+          const textOnlyFallback = await buildTextOnlyAttachmentFallbackInputMessage({
             composedInput,
             files,
+            filesApi: client as unknown as FilesContentApi,
           });
 
           console.log("[/api/chat] Retrying without input_file attachments after compatibility rejection", {
@@ -1037,6 +1369,7 @@ export async function POST(req: NextRequest) {
             status: getErrorStatusCode(fallbackError),
             message: (fallbackError as { message?: string })?.message,
             unavailableAttachmentCount: textOnlyFallback.attachmentNames.length,
+            extractedAttachmentCount: textOnlyFallback.extractedCount,
           });
 
           const textOnlyRequest: ChatResponsesRequest = {

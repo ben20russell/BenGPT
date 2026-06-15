@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const responsesCreateSpy = vi.fn();
 const filesWaitForProcessingSpy = vi.fn();
+const filesContentSpy = vi.fn();
 const { readFileMock, appendFileMock, execFileMock } = vi.hoisted(() => ({
   readFileMock: vi.fn(),
   appendFileMock: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("openai", () => {
     };
     files = {
       waitForProcessing: filesWaitForProcessingSpy,
+      content: filesContentSpy,
     };
   }
 
@@ -38,6 +40,7 @@ describe("POST /api/chat request shape", () => {
   beforeEach(() => {
     responsesCreateSpy.mockReset();
     filesWaitForProcessingSpy.mockReset();
+    filesContentSpy.mockReset();
     readFileMock.mockReset();
     appendFileMock.mockReset();
     execFileMock.mockReset();
@@ -300,7 +303,7 @@ describe("POST /api/chat request shape", () => {
     expect(firstCall.instructions).not.toContain("--- MEMORY: CONTEXT FROM PAST SEARCHES ---");
   });
 
-  it("uses input_file.file_id for binary files that were uploaded ahead of time", async () => {
+  it("uses input_file.file_id for binary files that were uploaded ahead of time and omits filename", async () => {
     responsesCreateSpy.mockResolvedValue({
       output_text: "ok",
       output: [],
@@ -347,9 +350,9 @@ describe("POST /api/chat request shape", () => {
     expect(inputFile).toMatchObject({
       type: "input_file",
       file_id: "file_pdf_123",
-      filename: "sample.pdf",
     });
     expect(inputFile).not.toHaveProperty("file_data");
+    expect(inputFile).not.toHaveProperty("filename");
   });
 
   it("continues without attaching file_id when uploaded file is not ready in time for parsing", async () => {
@@ -450,8 +453,8 @@ describe("POST /api/chat request shape", () => {
     expect(inputFiles).toHaveLength(1);
     expect(inputFiles[0]).toMatchObject({
       file_id: "file_pdf_ready",
-      filename: "ready.pdf",
     });
+    expect(inputFiles[0]).not.toHaveProperty("filename");
     expect(inputText.toLowerCase()).toContain("slow.pdf");
     expect(inputText.toLowerCase()).toContain("still processing");
   });
@@ -547,8 +550,8 @@ describe("POST /api/chat request shape", () => {
     expect(retryInputFile).toMatchObject({
       type: "input_file",
       file_id: "file_report_001",
-      filename: "report.pdf",
     });
+    expect(retryInputFile).not.toHaveProperty("filename");
   });
 
   it("falls back to text-only file notes when deployment rejects input_file attachments on all retries", async () => {
@@ -606,6 +609,140 @@ describe("POST /api/chat request shape", () => {
     expect(thirdInputFile).toBeUndefined();
     expect(thirdInputText.toLowerCase()).toContain("uploaded file references could not be attached");
     expect(thirdInputText.toLowerCase()).toContain("unsupported-input-file.pdf");
+  });
+
+  it("injects extracted uploaded text into fallback request when input_file is unsupported", async () => {
+    responsesCreateSpy.mockImplementation(async (request: {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+      tools?: unknown[];
+    }) => {
+      const hasInputFile = Boolean(
+        request.input?.[0]?.content?.some((item) => item.type === "input_file"),
+      );
+      if (hasInputFile) {
+        throw {
+          status: 400,
+          message: "input_file is not supported by this deployment",
+        };
+      }
+      return {
+        output_text: "Recovered with extracted uploaded file text",
+        output: [],
+      };
+    });
+    filesContentSpy.mockResolvedValue(
+      new Response("Quarterly revenue increased 22% year over year."),
+    );
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Summarize the attached report",
+        mode: "thinking",
+        useMemory: false,
+        files: [
+          {
+            name: "report.txt",
+            type: "text/plain",
+            size: 1234,
+            contentKind: "binary",
+            fileId: "file_text_fallback_1",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(3);
+    expect(filesContentSpy).toHaveBeenCalledTimes(1);
+    expect(filesContentSpy).toHaveBeenCalledWith("file_text_fallback_1");
+
+    const thirdCall = responsesCreateSpy.mock.calls[2]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const thirdContent = thirdCall.input?.[0]?.content || [];
+    const thirdInputFile = thirdContent.find((item) => item.type === "input_file");
+    const thirdInputText = String(thirdContent.find((item) => item.type === "input_text")?.text || "");
+
+    expect(thirdInputFile).toBeUndefined();
+    expect(thirdInputText.toLowerCase()).toContain("extracted fallback text from uploaded files");
+    expect(thirdInputText.toLowerCase()).toContain("quarterly revenue increased 22% year over year");
+  });
+
+  it("extracts PDF text from downloaded uploaded bytes for fallback requests", async () => {
+    responsesCreateSpy.mockImplementation(async (request: {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    }) => {
+      const hasInputFile = Boolean(
+        request.input?.[0]?.content?.some((item) => item.type === "input_file"),
+      );
+      if (hasInputFile) {
+        throw {
+          status: 400,
+          message: "input_file is not supported by this deployment",
+        };
+      }
+      return {
+        output_text: "Recovered with extracted PDF text",
+        output: [],
+      };
+    });
+
+    const { PDFDocument, StandardFonts } = await import("pdf-lib");
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage([612, 792]);
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    page.drawText("Operating margin expanded to 31 percent.", {
+      x: 72,
+      y: 700,
+      size: 16,
+      font,
+    });
+    const pdfBytes = await pdf.save({ useObjectStreams: false });
+    filesContentSpy.mockResolvedValue(new Response(new Uint8Array(pdfBytes)));
+
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: "Summarize the attached PDF",
+        mode: "thinking",
+        useMemory: false,
+        files: [
+          {
+            name: "financial-report.pdf",
+            type: "application/pdf",
+            size: pdfBytes.length,
+            contentKind: "binary",
+            fileId: "file_pdf_fallback_extract_1",
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req as never);
+
+    expect(res.status).toBe(200);
+    expect(responsesCreateSpy).toHaveBeenCalledTimes(3);
+    expect(filesContentSpy).toHaveBeenCalledWith("file_pdf_fallback_extract_1");
+
+    const thirdCall = responsesCreateSpy.mock.calls[2]?.[0] as {
+      input?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const thirdContent = thirdCall.input?.[0]?.content || [];
+    const thirdInputFile = thirdContent.find((item) => item.type === "input_file");
+    const thirdInputText = String(thirdContent.find((item) => item.type === "input_text")?.text || "");
+
+    expect(thirdInputFile).toBeUndefined();
+    expect(thirdInputText.toLowerCase()).toContain("extracted fallback text from uploaded files");
+    expect(thirdInputText.toLowerCase()).toContain("operating margin expanded to 31 percent");
   });
 
   it("falls back to text-only file notes when file-attached requests return server-side 500 errors", async () => {
@@ -813,8 +950,8 @@ describe("POST /api/chat request shape", () => {
     expect(inputFile).toMatchObject({
       type: "input_file",
       file_id: "file_brief_001",
-      filename: "brief.pdf",
     });
+    expect(inputFile).not.toHaveProperty("filename");
   });
 
   it("returns normalized token usage from response.usage", async () => {
