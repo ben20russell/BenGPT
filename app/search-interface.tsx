@@ -40,6 +40,10 @@ const DIRECT_UPLOAD_PREFERENCE_BYTES = 4 * 1024 * 1024;
 const CHUNKED_UPLOAD_PART_BYTES = 3 * 1024 * 1024;
 const MAX_PARALLEL_FILE_UPLOADS = 2;
 const FILE_UPLOAD_SUCCESS_NOTE = 'Uploaded to files API and attached by file_id.';
+const LARGE_FILE_UPLOAD_FAILURE_REASON =
+  'Large file upload failed because chunked uploads are unavailable and direct uploads exceeded payload limits.';
+const LARGE_FILE_UPLOAD_FAILURE_TOAST =
+  'Large file upload failed: chunked uploads are unavailable and direct uploads exceeded payload limits. Try a smaller PDF or retry shortly.';
 const DEFAULT_SEARCH_MODE: SearchMode = 'web_search';
 const DEFAULT_REASONING_INTENSITY: ReasoningIntensity = 'auto';
 const DEFAULT_CHAT_MODEL_LABEL = 'Unknown model';
@@ -758,9 +762,7 @@ async function uploadBinaryContextFileSmart(file: File): Promise<string> {
           directMessage.includes('entity too large');
 
         if (directPayloadLimit) {
-          throw new Error(
-            'Large file upload failed because chunked uploads are unavailable and direct uploads exceeded payload limits.',
-          );
+          throw new Error(LARGE_FILE_UPLOAD_FAILURE_REASON);
         }
 
         throw chunkedUploadError;
@@ -1648,6 +1650,12 @@ export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}
       .filter((result): result is PromiseFulfilledResult<UploadedContextFile> => result.status === 'fulfilled')
       .map((result) => result.value);
     const failures = results.filter((result) => result.status === 'rejected').length;
+    const failureMessages = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => (result.reason instanceof Error ? result.reason.message : String(result.reason || 'Upload failed')));
+    const hasLargeFilePayloadLimitFailure = failureMessages.some((message) =>
+      message.toLowerCase().includes(LARGE_FILE_UPLOAD_FAILURE_REASON.toLowerCase()),
+    );
 
     const statusUpdatesById = new Map<string, { status: FileUploadStatus; error?: string }>();
     results.forEach((result, index) => {
@@ -1683,7 +1691,15 @@ export default function SearchInterface({ chatModel }: SearchInterfaceProps = {}
     }
     const uploadedByIdCount = normalized.filter((item) => item.contentKind === 'binary' && Boolean(item.fileId)).length;
     if (failures > 0) {
-      showToast(`Could not upload ${failures} file${failures === 1 ? '' : 's'}. Try re-uploading.`);
+      if (hasLargeFilePayloadLimitFailure) {
+        console.log('[UI] Showing precise upload failure toast for chunked-init outage + direct payload limit path', {
+          failures,
+          failureMessages,
+        });
+        showToast(LARGE_FILE_UPLOAD_FAILURE_TOAST);
+      } else {
+        showToast(`Could not upload ${failures} file${failures === 1 ? '' : 's'}. Try re-uploading.`);
+      }
     }
     if (uploadedByIdCount > 0) {
       showToast(

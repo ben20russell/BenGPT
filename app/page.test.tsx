@@ -855,6 +855,66 @@ describe('SearchInterface', () => {
     expect(completeCalls).toHaveLength(1);
   });
 
+  it('shows a precise toast when large file upload hits chunked-init outage and direct payload limits', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockImplementation(async (input: unknown) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input && typeof input === 'object' && 'url' in input
+            ? String((input as { url?: string }).url ?? '')
+            : String(input);
+
+      if (url.includes('/api/files/upload/chunked/init')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            error: 'Could not start chunked upload.',
+            recovery: 'Uploads API is unavailable for this deployment.',
+          }),
+        };
+      }
+
+      if (url.includes('/api/files/upload/chunked/part')) {
+        throw new Error('chunked part should not be called when init fails');
+      }
+
+      if (url.includes('/api/files/upload/chunked/complete')) {
+        throw new Error('chunked complete should not be called when init fails');
+      }
+
+      if (url.includes('/api/files/upload')) {
+        return {
+          ok: false,
+          status: 413,
+          json: async () => ({
+            error: 'Payload too large',
+            recovery: 'Direct upload request body exceeded deployment limits.',
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ answer: 'ok', citations: [] }),
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SearchInterface />);
+
+    const hugePdfBytes = new Uint8Array(7 * 1024 * 1024);
+    const hugePdfFile = new File([hugePdfBytes], 'failure-chain.pdf', { type: 'application/pdf' });
+    await user.upload(screen.getByTestId('file-input'), hugePdfFile);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('toast')).toHaveTextContent(
+        /chunked uploads are unavailable and direct uploads exceeded payload limits/i,
+      );
+    });
+  });
+
   it('does not apply a client-side cap to how many files can be attached in one message', async () => {
     const user = userEvent.setup();
     let uploadCounter = 0;
